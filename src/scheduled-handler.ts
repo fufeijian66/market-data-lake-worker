@@ -20,7 +20,7 @@ export async function runScheduled(env: Env): Promise<void> {
       try {
         const fresh = await fetchOHLCV(job.market, job.ticker, job.interval);
         const key = objectKey(job.market, job.interval, job.ticker);
-        await mergeAndUpload(s3, env.S3_BUCKET, key, fresh);
+        await mergeAndUpload(s3, key, fresh);
         await markSuccess(env, job);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

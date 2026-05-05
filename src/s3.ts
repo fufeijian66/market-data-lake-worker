@@ -1,23 +1,36 @@
-// S3 工具：S3Client 工厂 + Read-Merge-Overwrite + tail 预览
-// 强制使用 @aws-sdk/client-s3，禁用 R2 binding（架构红线 #1）
+// S3 工具：基于 aws4fetch 的 SigV4 签名 + Read-Merge-Overwrite + tail 预览
+// 强制使用标准 S3 SigV4 协议，禁用 R2 binding（架构红线 #1）
+//
+// 历史决策：原计划用 @aws-sdk/client-s3，但该 SDK 在 Cloudflare Workers 上即使开 nodejs_compat
+// 仍偶发 import / 运行期崩溃（@smithy/* 子依赖与 Workers 运行时不兼容）。aws4fetch 是
+// Cloudflare 官方推荐的轻量替代（约 5KB，零 Node 依赖），纯 fetch + SigV4 签名，
+// 跨云 S3-兼容服务（R2 / 阿里云 OSS / MinIO / AWS S3）通用。架构红线意图（标准 S3 协议、
+// 禁 R2 binding、跨云迁移）保持不变。
 
-import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+import { AwsClient } from 'aws4fetch';
 import type { Env, OHLCV } from './types';
 
 const CSV_HEADER = 'Datetime,Open,High,Low,Close,Volume';
 
-/** 从 env 初始化 S3Client，凭证只走 env，禁止硬编码（架构红线 #2） */
-export function createS3Client(env: Env): S3Client {
-  return new S3Client({
-    endpoint: env.S3_ENDPOINT,
+/** S3 调用上下文（凭证只走 env，架构红线 #2） */
+export interface S3Ctx {
+  client: AwsClient;
+  bucket: string;
+  endpoint: string;
+}
+
+export function createS3Client(env: Env): S3Ctx {
+  const client = new AwsClient({
+    accessKeyId: env.S3_ACCESS_KEY_ID,
+    secretAccessKey: env.S3_SECRET_ACCESS_KEY,
+    service: 's3',
     region: env.S3_REGION,
-    credentials: {
-      accessKeyId: env.S3_ACCESS_KEY_ID,
-      secretAccessKey: env.S3_SECRET_ACCESS_KEY,
-    },
-    // R2 等 S3-兼容服务通常需要 forcePathStyle，AWS S3 默认 false 也能跑
-    forcePathStyle: true,
   });
+  return {
+    client,
+    bucket: env.S3_BUCKET,
+    endpoint: env.S3_ENDPOINT.replace(/\/$/, ''),
+  };
 }
 
 /** 对象 Key 格式（架构红线 #3）：{Market}/{Interval}/{Ticker}.csv */
@@ -25,25 +38,22 @@ export function objectKey(market: string, interval: string, ticker: string): str
   return `${market}/${interval}/${ticker}.csv`;
 }
 
-/** SDK v3 GetObject.Body 在 Workers 是 ReadableStream / Blob，统一吸成字符串 */
-async function bodyToString(body: unknown): Promise<string> {
-  if (body == null) return '';
-  if (typeof body === 'string') return body;
-  // 用 Response 包装最稳：能吃 ReadableStream / Blob / ArrayBuffer
-  return await new Response(body as BodyInit).text();
+/** path-style URL：兼容性最好（R2 / OSS / MinIO 全部支持） */
+function objectUrl(ctx: S3Ctx, key: string): string {
+  const encoded = key.split('/').map(encodeURIComponent).join('/');
+  return `${ctx.endpoint}/${ctx.bucket}/${encoded}`;
 }
 
 function parseCsv(text: string): OHLCV[] {
   const lines = text.trim().split(/\r?\n/);
   if (lines.length === 0 || lines[0] === '') return [];
-  // 兼容历史文件可能没有表头：检测第一行是否表头
   const start = lines[0].startsWith('Datetime,') ? 1 : 0;
   const out: OHLCV[] = [];
   for (let i = start; i < lines.length; i++) {
     const cols = lines[i].split(',');
     if (cols.length < 6) continue;
     const open = Number(cols[1]);
-    if (!Number.isFinite(open)) continue; // 跳过坏行（如尾部空行）
+    if (!Number.isFinite(open)) continue;
     out.push({
       Datetime: cols[0],
       Open: open,
@@ -63,69 +73,68 @@ function toCsv(rows: OHLCV[]): string {
   return `${CSV_HEADER}\n${body}\n`;
 }
 
-function isNotFound(err: unknown): boolean {
-  const e = err as { name?: string; $metadata?: { httpStatusCode?: number } };
-  return e?.name === 'NoSuchKey' || e?.$metadata?.httpStatusCode === 404;
+async function getObjectText(
+  ctx: S3Ctx,
+  key: string,
+): Promise<{ found: true; text: string } | { found: false }> {
+  const resp = await ctx.client.fetch(objectUrl(ctx, key));
+  if (resp.status === 404) return { found: false };
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    throw new Error(`S3 GET ${key} HTTP ${resp.status} ${body.slice(0, 200)}`);
+  }
+  return { found: true, text: await resp.text() };
+}
+
+async function putObject(ctx: S3Ctx, key: string, body: string, contentType: string): Promise<void> {
+  const resp = await ctx.client.fetch(objectUrl(ctx, key), {
+    method: 'PUT',
+    body,
+    headers: { 'content-type': contentType },
+  });
+  if (!resp.ok) {
+    const errBody = await resp.text().catch(() => '');
+    throw new Error(`S3 PUT ${key} HTTP ${resp.status} ${errBody.slice(0, 200)}`);
+  }
 }
 
 /**
  * Read-Merge-Overwrite（架构红线 #6）：
- *   GetObject → 解析 CSV → 合并新数据 → 按 Datetime 去重升序 → PutObject 覆盖
- *   NoSuchKey / 404 当作空数组处理，不视为错误
+ *   GET → 解析 CSV → 合并新数据 → 按 Datetime 去重升序 → PUT 覆盖
+ *   404 当作空数组处理，不视为错误
  */
 export async function mergeAndUpload(
-  s3: S3Client,
-  bucket: string,
+  ctx: S3Ctx,
   key: string,
   fresh: OHLCV[],
 ): Promise<{ total: number; newlyAdded: number }> {
-  let existing: OHLCV[] = [];
-  try {
-    const obj = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
-    const text = await bodyToString(obj.Body);
-    existing = parseCsv(text);
-  } catch (err) {
-    if (!isNotFound(err)) throw err;
-  }
+  const got = await getObjectText(ctx, key);
+  const existing = got.found ? parseCsv(got.text) : [];
 
   const dedup = new Map<string, OHLCV>();
   for (const row of existing) dedup.set(row.Datetime, row);
   const before = dedup.size;
-  for (const row of fresh) dedup.set(row.Datetime, row); // 新数据覆盖旧数据
+  for (const row of fresh) dedup.set(row.Datetime, row);
   const merged = Array.from(dedup.values()).sort((a, b) =>
     a.Datetime < b.Datetime ? -1 : a.Datetime > b.Datetime ? 1 : 0,
   );
 
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: bucket,
-      Key: key,
-      Body: toCsv(merged),
-      ContentType: 'text/csv; charset=utf-8',
-    }),
-  );
-
+  await putObject(ctx, key, toCsv(merged), 'text/csv; charset=utf-8');
   return { total: merged.length, newlyAdded: merged.length - before };
 }
 
-/** 取末尾 N 行 CSV（含表头），后台「单作业详情」预览用 */
+/** 取末尾 N 行 CSV，后台「单作业详情」预览用 */
 export async function tailCsv(
-  s3: S3Client,
-  bucket: string,
+  ctx: S3Ctx,
   key: string,
   n: number,
 ): Promise<{ header: string; rows: string[] }> {
-  try {
-    const obj = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
-    const text = await bodyToString(obj.Body);
-    const lines = text.trim().split(/\r?\n/);
-    if (lines.length === 0) return { header: CSV_HEADER, rows: [] };
-    const hasHeader = lines[0].startsWith('Datetime,');
-    const header = hasHeader ? lines[0] : CSV_HEADER;
-    const body = hasHeader ? lines.slice(1) : lines;
-    return { header, rows: body.slice(-n) };
-  } catch (err) {
-    if (isNotFound(err)) return { header: CSV_HEADER, rows: [] };
-    throw err;
-  }
+  const got = await getObjectText(ctx, key);
+  if (!got.found) return { header: CSV_HEADER, rows: [] };
+  const lines = got.text.trim().split(/\r?\n/);
+  if (lines.length === 0) return { header: CSV_HEADER, rows: [] };
+  const hasHeader = lines[0].startsWith('Datetime,');
+  const header = hasHeader ? lines[0] : CSV_HEADER;
+  const body = hasHeader ? lines.slice(1) : lines;
+  return { header, rows: body.slice(-n) };
 }

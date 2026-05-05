@@ -3,12 +3,9 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "market-data-lake-worker",
 	"main": "src/index.ts",
-	// 较新的 compatibility_date 是 nodejs_compat 在 Workers 上正常工作的前提
 	"compatibility_date": "2025-04-01",
-	// @aws-sdk/client-s3 内部用到 Node API（stream / buffer），必须开 nodejs_compat
-	"compatibility_flags": [
-		"nodejs_compat"
-	],
+	// 使用 aws4fetch（纯 fetch + SigV4），不依赖 Node API，所以不开 nodejs_compat。
+	// 移除 nodejs_compat 也避开了它对 module 加载语义的潜在副作用。
 	// Cron Triggers：每 15 分钟一批；20 条/批，CPU 时间通常 2~10 秒
 	"triggers": {
 		"crons": [
@@ -32,7 +29,8 @@
 	"vars": {
 		// —— S3 凭证（敏感的 access key / secret key 走 secret，不在 vars） ——
 		"S3_ENDPOINT": "https://oss-cn-shanghai.aliyuncs.com",
-		"S3_REGION": "oss-cn-shanghai",
+		// 阿里云 OSS S3-SigV4 签名 region 是 cn-shanghai（不带 oss- 前缀）
+		"S3_REGION": "cn-shanghai",
 		"S3_BUCKET": "market-data-cf",
 		// —— Cloudflare Access ——
 		"ACCESS_TEAM_DOMAIN": "newone1997.cloudflareaccess.com",

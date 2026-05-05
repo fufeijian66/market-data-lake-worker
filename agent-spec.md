@@ -11,7 +11,7 @@
 
 需具备：
 - Cloudflare Workers / Wrangler 实战经验
-- AWS S3 SDK（`@aws-sdk/client-s3` v3）使用经验
+- S3 SigV4 签名 / `aws4fetch` 在 Workers 上的使用经验
 - 金融行情数据领域经验（OHLCV、tick / bar 粒度、市场代码规范）
 - 安全意识（Access JWT 校验、敏感项走 secret 而非 vars）
 
@@ -25,7 +25,7 @@
 
 下面这组约束是项目的硬性边界。**任何代码改动都不得违反，违反必须先在文档中改红线再写代码。**
 
-1. **存储层只走标准 S3 协议** —— 必须使用 `@aws-sdk/client-s3`，**禁止**使用 Cloudflare R2 原生 binding API（如 `env.MY_BUCKET.put/get/list`）。这是为了保留跨云迁移能力。
+1. **存储层只走标准 S3 SigV4 协议** —— 使用 `aws4fetch` 做 SigV4 签名（约 5KB，零 Node 依赖，Workers 上稳定），**禁止**使用 Cloudflare R2 原生 binding API（如 `env.MY_BUCKET.put/get/list`）。这是为了保留跨云迁移能力。原计划用 `@aws-sdk/client-s3` 但该 SDK 在 Workers 即使开 `nodejs_compat` 仍因 `@smithy/*` 子依赖触发运行期异常，故已替换。
 2. **凭证只从 env 读** —— `S3Client` 初始化必须从 `env.S3_ENDPOINT` / `env.S3_REGION` / `env.S3_ACCESS_KEY_ID` / `env.S3_SECRET_ACCESS_KEY` 读取，禁止在代码中硬编码任何 endpoint、region、access key。
 3. **对象 Key 格式固定** —— `{Market}/{Interval}/{Ticker}.csv`，例如 `US/1d/AAPL.csv`、`US/1h/AAPL.csv`、`HK/1d/0700.HK.csv`、`CN/1d/sh600519.csv`。
 4. **支持的 Interval 取值** —— `1m | 5m | 15m | 30m | 1h | 1d | 1wk | 1mo`（与 Yahoo Finance 命名对齐；A 股数据源做映射适配）。
@@ -218,8 +218,8 @@ LLM 经常默默选择一种解释然后执行。这个原则强制明确推理�
 
 | 文件 | 说明 |
 |------|------|
-| `package.json` | 依赖 `@aws-sdk/client-s3`（必需）+ TypeScript / Wrangler 工具链 |
-| `wrangler.jsonc` | D1 binding（`market_data_lake`）、Cron Triggers、`vars`（含 `ACCESS_*`、`S3_*`）、`compatibility_flags: ["nodejs_compat"]` |
+| `package.json` | 依赖 `aws4fetch`（必需）+ TypeScript / Wrangler 工具链 |
+| `wrangler.jsonc` | D1 binding（`market_data_lake`）、Cron Triggers、`vars`（含 `ACCESS_*`、`S3_*`） |
 | `schema.sql` | `tickers` + `ticker_intervals` 双表 + 必要索引（`(is_active, last_updated_at)` 复合索引） |
 | `src/index.ts` | 入口，导出 `fetch` 与 `scheduled` |
 | `src/scheduled-handler.ts` | Cron 抓取主流程 |

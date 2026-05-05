@@ -10,7 +10,7 @@
 
 下面这组约束是项目的硬性边界。**任何代码改动都不得违反，违反必须先在文档中改红线再写代码。**
 
-1. **存储层只走标准 S3 协议** —— 必须使用 `@aws-sdk/client-s3`，**禁止**使用 Cloudflare R2 原生 binding API（如 `env.MY_BUCKET.put/get/list`）。这是为了保留跨云迁移能力。
+1. **存储层只走标准 S3 SigV4 协议** —— 使用 `aws4fetch` 做 SigV4 签名（约 5KB，零 Node 依赖，Workers 上稳定），**禁止**使用 Cloudflare R2 原生 binding API（如 `env.MY_BUCKET.put/get/list`）。这是为了保留跨云迁移能力。原计划用 `@aws-sdk/client-s3` 但该 SDK 在 Workers 即使开 `nodejs_compat` 仍因 `@smithy/*` 子依赖触发运行期异常，故已替换。
 2. **凭证只从 env 读** —— `S3Client` 初始化必须从 `env.S3_ENDPOINT` / `env.S3_REGION` / `env.S3_ACCESS_KEY_ID` / `env.S3_SECRET_ACCESS_KEY` 读取，禁止在代码中硬编码任何 endpoint、region、access key。
 3. **对象 Key 格式固定** —— `{Market}/{Interval}/{Ticker}.csv`，例如 `US/1d/AAPL.csv`、`US/1h/AAPL.csv`、`HK/1d/0700.HK.csv`、`CN/1d/sh600519.csv`。
 4. **支持的 Interval 取值** —— `1m | 5m | 15m | 30m | 1h | 1d | 1wk | 1mo`（与 Yahoo Finance 命名对齐；A 股数据源做映射适配）。
@@ -29,7 +29,7 @@
 ```
 .
 ├── package.json
-├── wrangler.jsonc           # Workers 配置（D1 binding、Cron、vars、nodejs_compat）
+├── wrangler.jsonc           # Workers 配置（D1 binding、Cron、vars）
 ├── schema.sql               # tickers + ticker_intervals 双表
 ├── agent-spec.md            # 完整角色规约（PRD 风格，含部署步骤）
 ├── AGENTS.md                # 跨 Agent 通用记忆（与本文件共享红线）
@@ -68,8 +68,8 @@ wrangler deploy
 
 ## 常见陷阱
 
-- `@aws-sdk/client-s3` 在 Workers 上需要 `compatibility_flags: ["nodejs_compat"]` 与较新的 `compatibility_date`，否则 SDK 内部用到的 Node API 会报缺失
-- `S3Client` 初始化时 `region` 与 `endpoint` 必须显式传，留空会被 SDK 当成 AWS 公网默认值
+- `aws4fetch` 在 Workers 上零依赖运行；不需要 `nodejs_compat`，加了反而可能干扰 module 加载
+- 阿里云 OSS 走 SigV4 时，`S3_REGION` 必须填 `cn-shanghai`（**去掉 `oss-` 前缀**），否则签名会被拒；`S3_ENDPOINT` 仍是完整的 `https://oss-cn-shanghai.aliyuncs.com`
 - `Cf-Access-Jwt-Assertion` 头只有在 Cloudflare 侧建好 Self-hosted Application 后才会注入；本地 `wrangler dev` 时该头不存在，`access-auth.ts` 需有"开发模式跳过"的环境分支
 - 部署前敏感项务必 `wrangler secret put`，**不要**写进 `wrangler.jsonc` 的 `vars`
 - Worker 自定义域名必须走 Cloudflare 代理（橙云），否则 Access 策略无法生效

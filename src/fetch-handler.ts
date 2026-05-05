@@ -133,7 +133,7 @@ async function apiJobDetail(env: Env, ticker: string, interval: string): Promise
 
   // S3 末尾 N 行预览
   const s3 = createS3Client(env);
-  const preview = await tailCsv(s3, env.S3_BUCKET, objectKey(row.market, row.interval, row.ticker), 50);
+  const preview = await tailCsv(s3, objectKey(row.market, row.interval, row.ticker), 50);
   return jsonOk({ ...row, preview });
 }
 
