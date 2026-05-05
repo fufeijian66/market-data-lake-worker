@@ -30,6 +30,17 @@ CREATE INDEX IF NOT EXISTS idx_jobs_active_oldest
 -- 后台筛选用：按市场 + 状态过滤
 CREATE INDEX IF NOT EXISTS idx_tickers_market ON tickers (market);
 
+-- 系统级配置（kv 表，存运行时开关；cron schedule 由 wrangler.jsonc 决定，这里仅用于展示）
+CREATE TABLE IF NOT EXISTS system_config (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+-- 默认值：cron 默认开启，schedule 仅用于 UI 展示（真值在 wrangler.jsonc）
+INSERT OR IGNORE INTO system_config (key, value) VALUES
+  ('cron_enabled',  '1'),
+  ('cron_schedule', '*/5 * * * *');
+
 -- =============================================================================
 -- 示例种子数据（按需取消注释执行）
 -- =============================================================================

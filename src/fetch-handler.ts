@@ -5,8 +5,10 @@ import type { Env, JobRow, Market } from './types';
 import { requireAccess } from './access-auth';
 import { createS3Client, objectKey, tailCsv } from './s3';
 import { ADMIN_HTML } from './admin-ui';
+import { runScheduled } from './scheduled-handler';
+import { fetchListings } from './sources/listings';
 
-export async function handleFetch(req: Request, env: Env): Promise<Response> {
+export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(req.url);
 
   if (url.pathname === '/' || url.pathname === '/admin' || url.pathname === '/admin/') {
@@ -17,7 +19,7 @@ export async function handleFetch(req: Request, env: Env): Promise<Response> {
     );
   }
   if (url.pathname.startsWith('/api/')) {
-    return guarded(req, env, () => handleApi(req, env, url));
+    return guarded(req, env, () => handleApi(req, env, ctx, url));
   }
   return new Response('Not Found', { status: 404 });
 }
@@ -42,12 +44,18 @@ async function guarded(
   }
 }
 
-async function handleApi(req: Request, env: Env, url: URL): Promise<Response> {
+async function handleApi(req: Request, env: Env, ctx: ExecutionContext, url: URL): Promise<Response> {
   const path = url.pathname;
   const method = req.method.toUpperCase();
 
   if (method === 'GET' && path === '/api/health') return apiHealth(env);
   if (method === 'GET' && path === '/api/jobs') return apiJobsList(env, url);
+
+  // —— 系统级控制 ——
+  if (method === 'GET' && path === '/api/system') return apiSystemGet(env);
+  if (method === 'POST' && path === '/api/system/cron/toggle') return apiSystemCronToggle(env);
+  if (method === 'POST' && path === '/api/system/run') return apiSystemRun(env, ctx);
+  if (method === 'POST' && path === '/api/system/import') return apiSystemImport(env, url);
 
   // /api/jobs/:ticker/:interval[/(pause|resume|retry)]
   const m = path.match(/^\/api\/jobs\/([^/]+)\/([^/]+)(?:\/(pause|resume|retry))?$/);
@@ -76,7 +84,7 @@ function jsonErr(error: string, status: number): Response {
   });
 }
 
-// ---- handlers ---------------------------------------------------------------
+// ---- 普通 handlers ---------------------------------------------------------
 
 async function apiHealth(env: Env): Promise<Response> {
   const r = await env.market_data_lake.prepare(
@@ -131,7 +139,6 @@ async function apiJobDetail(env: Env, ticker: string, interval: string): Promise
     .first<JobRow & { market: Market }>();
   if (!row) return jsonErr('Not Found', 404);
 
-  // S3 末尾 N 行预览
   const s3 = createS3Client(env);
   const preview = await tailCsv(s3, objectKey(row.market, row.interval, row.ticker), 50);
   return jsonOk({ ...row, preview });
@@ -148,7 +155,6 @@ async function apiSetActive(env: Env, ticker: string, interval: string, value: 0
 }
 
 async function apiRetry(env: Env, ticker: string, interval: string): Promise<Response> {
-  // 清错误标记 + 把 last_updated_at 设为 0 → 下一轮 Cron 优先抓
   const r = await env.market_data_lake.prepare(
     `UPDATE ticker_intervals
         SET error_flag = 0,
@@ -160,4 +166,83 @@ async function apiRetry(env: Env, ticker: string, interval: string): Promise<Res
     .run();
   if ((r.meta?.changes ?? 0) === 0) return jsonErr('Not Found', 404);
   return jsonOk({ ok: true });
+}
+
+// ---- 系统级 handlers -------------------------------------------------------
+
+async function apiSystemGet(env: Env): Promise<Response> {
+  const { results } = await env.market_data_lake
+    .prepare(`SELECT key, value FROM system_config WHERE key IN ('cron_enabled','cron_schedule')`)
+    .all<{ key: string; value: string }>();
+  const map: Record<string, string> = {};
+  for (const r of results ?? []) map[r.key] = r.value;
+  return jsonOk({
+    cron_enabled: map.cron_enabled === '1',
+    cron_schedule: map.cron_schedule ?? '*/5 * * * *',
+  });
+}
+
+async function apiSystemCronToggle(env: Env): Promise<Response> {
+  await env.market_data_lake
+    .prepare(
+      `UPDATE system_config
+          SET value = CASE WHEN value = '1' THEN '0' ELSE '1' END
+        WHERE key = 'cron_enabled'`,
+    )
+    .run();
+  return apiSystemGet(env);
+}
+
+/** 立即手动触发一次抓取批次（不等结果，dashboard 30s 自动刷新可见） */
+async function apiSystemRun(env: Env, ctx: ExecutionContext): Promise<Response> {
+  ctx.waitUntil(runScheduled(env));
+  return jsonOk({ ok: true, message: 'Cron run triggered in background' });
+}
+
+/**
+ * 批量导入某市场的全部标的清单：
+ *   - US：NASDAQ Trader 公开 listing 文件（~7000）
+ *   - CN：东方财富全 A 股清单（~5000）
+ *   - HK：硬编码 HSI 主要成分股（~80）
+ * 所有插入用 INSERT OR IGNORE，重复执行幂等。导入后默认抓 1d。
+ */
+async function apiSystemImport(env: Env, url: URL): Promise<Response> {
+  const market = url.searchParams.get('market') as Market | null;
+  if (market !== 'US' && market !== 'HK' && market !== 'CN') {
+    return jsonErr('market must be US/HK/CN', 400);
+  }
+
+  const items = await fetchListings(market);
+  if (items.length === 0) return jsonOk({ market, fetched: 0, inserted: 0 });
+
+  // 分块 multi-VALUES INSERT：D1 每条 prepare 的占位符上限有限，80 条/批安全
+  const CHUNK = 80;
+  let insertedTickers = 0;
+  let insertedJobs = 0;
+  for (let i = 0; i < items.length; i += CHUNK) {
+    const chunk = items.slice(i, i + CHUNK);
+
+    const ph1 = chunk.map(() => '(?, ?)').join(',');
+    const p1 = chunk.flatMap((t) => [t.ticker, t.market]);
+    const r1 = await env.market_data_lake
+      .prepare(`INSERT OR IGNORE INTO tickers (ticker, market) VALUES ${ph1}`)
+      .bind(...p1)
+      .run();
+    insertedTickers += r1.meta?.changes ?? 0;
+
+    const ph2 = chunk.map(() => '(?, ?)').join(',');
+    const p2 = chunk.flatMap((t) => [t.ticker, '1d']);
+    const r2 = await env.market_data_lake
+      .prepare(`INSERT OR IGNORE INTO ticker_intervals (ticker, interval) VALUES ${ph2}`)
+      .bind(...p2)
+      .run();
+    insertedJobs += r2.meta?.changes ?? 0;
+  }
+
+  return jsonOk({
+    market,
+    fetched: items.length,
+    inserted_tickers: insertedTickers,
+    inserted_jobs: insertedJobs,
+  });
 }

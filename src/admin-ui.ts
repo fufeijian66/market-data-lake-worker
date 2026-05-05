@@ -1,5 +1,11 @@
 // 管理后台单页 HTML（vanilla JS，零前端构建）
 // 通过 /api/* 调用后端；动态渲染只用 createElement + textContent，杜绝 innerHTML 注入
+//
+// 控制面板（顶部）能力：
+//   - 显示 cron schedule（来自 wrangler.jsonc，D1 仅做镜像展示）
+//   - cron 启停开关（runtime D1 标记；scheduled-handler 启动时检查）
+//   - 立即手动触发一次抓取
+//   - 一键导入 US / HK / CN 全市场标的清单
 
 export const ADMIN_HTML = `<!doctype html>
 <html lang="zh-CN">
@@ -10,6 +16,11 @@ export const ADMIN_HTML = `<!doctype html>
 <style>
   body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;margin:0;padding:24px;background:#f5f6f8;color:#222}
   h1{font-size:20px;margin:0 0 16px}
+  h2{font-size:14px;margin:0 0 8px;color:#666;text-transform:uppercase;letter-spacing:.04em}
+  .panel{background:#fff;padding:14px 16px;border-radius:8px;box-shadow:0 1px 2px rgba(0,0,0,.06);margin-bottom:16px}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px}
+  .row + .row{margin-top:8px}
+  code{background:#f0f2f5;padding:2px 6px;border-radius:4px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
   .stats{display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap}
   .stat{background:#fff;padding:10px 14px;border-radius:8px;box-shadow:0 1px 2px rgba(0,0,0,.06);font-size:14px}
   .stat b{display:block;font-size:18px;margin-top:2px}
@@ -23,16 +34,34 @@ export const ADMIN_HTML = `<!doctype html>
   .pill.ok{background:#e6f4ea;color:#137333}
   .pill.paused{background:#eee;color:#555}
   .pill.err{background:#fce8e6;color:#a50e0e}
-  button{margin-right:4px;padding:4px 10px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;font-size:12px}
+  button{margin-right:4px;padding:5px 12px;border:1px solid #ccc;border-radius:5px;background:#fff;cursor:pointer;font-size:12px}
   button:hover{background:#f0f2f5}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  button.primary{background:#1a73e8;color:#fff;border-color:#1a73e8}
+  button.primary:hover{background:#1557b0}
   button.danger{color:#a50e0e}
   .pager{margin-top:12px;display:flex;gap:8px;align-items:center;font-size:13px}
   .err-msg{color:#a50e0e;font-size:11px;display:block;margin-top:2px;max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:help}
   .empty{text-align:center;color:#888;padding:24px}
+  .toast{position:fixed;right:24px;top:24px;background:#222;color:#fff;padding:10px 14px;border-radius:6px;font-size:13px;box-shadow:0 4px 12px rgba(0,0,0,.2);max-width:360px;z-index:10}
 </style>
 </head>
 <body>
 <h1>Market Data Lake — Dashboard</h1>
+
+<div class="panel" id="ctrl">
+  <h2>Cron 调度</h2>
+  <div class="row" id="ctrl-cron">Loading...</div>
+  <div class="row" style="margin-top:14px">
+    <h2 style="margin:0">批量导入全市场标的</h2>
+  </div>
+  <div class="row">
+    <button data-import="US">Import US (~7000)</button>
+    <button data-import="HK">Import HK (~80 HSI)</button>
+    <button data-import="CN">Import CN (~5000)</button>
+    <span style="color:#888;font-size:12px">导入只插 1d 作业，重复执行幂等</span>
+  </div>
+</div>
 
 <div class="stats" id="stats">Loading...</div>
 
@@ -76,7 +105,6 @@ export const ADMIN_HTML = `<!doctype html>
 
   function fmtTime(ts){ return ts ? new Date(ts).toLocaleString() : '—'; }
 
-  // —— 安全的 DOM 构造工具：所有用户/服务端数据只通过 textContent 注入 ——
   function el(tag, opts){
     var n = document.createElement(tag);
     if(opts){
@@ -88,9 +116,6 @@ export const ADMIN_HTML = `<!doctype html>
       if(opts.attrs) for(var a in opts.attrs) n.setAttribute(a, String(opts.attrs[a]));
     }
     return n;
-  }
-  function setOnly(parent, child){
-    parent.replaceChildren(child);
   }
 
   function statusPill(r){
@@ -105,6 +130,46 @@ export const ADMIN_HTML = `<!doctype html>
     if(color) td.style.color = color;
     tr.appendChild(td);
     return tr;
+  }
+
+  function toast(msg, isError){
+    var t = el('div', {className:'toast', text: msg});
+    if(isError) t.style.background = '#a50e0e';
+    document.body.appendChild(t);
+    setTimeout(function(){ t.remove(); }, 4000);
+  }
+
+  async function loadCtrl(){
+    var ctrl = document.getElementById('ctrl-cron');
+    var c;
+    try { c = await (await fetch('/api/system')).json(); }
+    catch(e){
+      ctrl.replaceChildren();
+      ctrl.appendChild(el('span', {style:{color:'#a50e0e'}, text:'Failed: ' + (e && e.message)}));
+      return;
+    }
+    ctrl.replaceChildren();
+    ctrl.appendChild(document.createTextNode('Schedule: '));
+    ctrl.appendChild(el('code', {text: c.cron_schedule}));
+    ctrl.appendChild(document.createTextNode('  ·  Status: '));
+    ctrl.appendChild(el('span', {
+      className: 'pill ' + (c.cron_enabled ? 'ok' : 'paused'),
+      text: c.cron_enabled ? 'ON' : 'OFF',
+    }));
+    ctrl.appendChild(document.createTextNode(' '));
+    ctrl.appendChild(el('button', {
+      text: c.cron_enabled ? 'Stop cron' : 'Start cron',
+      data: { action: 'cron-toggle' },
+    }));
+    ctrl.appendChild(el('button', {
+      className: 'primary',
+      text: 'Run now',
+      data: { action: 'cron-run' },
+    }));
+    ctrl.appendChild(el('span', {
+      style: { color: '#888', fontSize: '11px', marginLeft: '8px' },
+      text: '改 schedule 需要编辑 wrangler.jsonc 后重 deploy',
+    }));
   }
 
   async function load(){
@@ -127,7 +192,8 @@ export const ADMIN_HTML = `<!doctype html>
       health = await r[1].json();
     } catch(e){
       var msg = (e && e.message) ? e.message : 'unknown error';
-      setOnly(document.getElementById('rows'), emptyRow('Error: ' + msg, '#a50e0e'));
+      var tbody = document.getElementById('rows');
+      tbody.replaceChildren(emptyRow('Error: ' + msg, '#a50e0e'));
       return;
     }
     renderStats(health);
@@ -163,7 +229,6 @@ export const ADMIN_HTML = `<!doctype html>
       var r = rows[i];
       var tr = document.createElement('tr');
 
-      // Ticker（加粗）
       var tdTicker = document.createElement('td');
       tdTicker.appendChild(el('b', {text: r.ticker}));
       tr.appendChild(tdTicker);
@@ -171,7 +236,6 @@ export const ADMIN_HTML = `<!doctype html>
       tr.appendChild(el('td', {text: r.market}));
       tr.appendChild(el('td', {text: r.interval}));
 
-      // Status + 错误信息
       var tdStatus = document.createElement('td');
       tdStatus.appendChild(statusPill(r));
       if(r.error_message){
@@ -186,30 +250,59 @@ export const ADMIN_HTML = `<!doctype html>
       tr.appendChild(el('td', {text: fmtTime(r.last_updated_at)}));
       tr.appendChild(el('td', {text: r.error_count}));
 
-      // Actions
       var tdAct = document.createElement('td');
-      var primary = el('button', {
+      tdAct.appendChild(el('button', {
         text: r.is_active ? 'Pause' : 'Resume',
         data: { action: r.is_active ? 'pause' : 'resume', ticker: r.ticker, interval: r.interval },
-      });
-      var retry = el('button', {
+      }));
+      tdAct.appendChild(document.createTextNode(' '));
+      tdAct.appendChild(el('button', {
         className: 'danger',
         text: 'Retry',
         data: { action: 'retry', ticker: r.ticker, interval: r.interval },
-      });
-      tdAct.appendChild(primary);
-      tdAct.appendChild(document.createTextNode(' '));
-      tdAct.appendChild(retry);
+      }));
       tr.appendChild(tdAct);
 
       tbody.appendChild(tr);
     }
   }
 
-  async function act(ticker, interval, action){
+  async function rowAction(ticker, interval, action){
     var resp = await fetch('/api/jobs/' + encodeURIComponent(ticker) + '/' + encodeURIComponent(interval) + '/' + action, {method: 'POST'});
-    if(!resp.ok){ alert('Failed: ' + (await resp.text())); return; }
+    if(!resp.ok){ toast('Failed: ' + (await resp.text()), true); return; }
     load();
+  }
+
+  async function cronToggle(){
+    var resp = await fetch('/api/system/cron/toggle', {method:'POST'});
+    if(!resp.ok){ toast('Toggle failed', true); return; }
+    var c = await resp.json();
+    toast('Cron is now ' + (c.cron_enabled ? 'ON' : 'OFF'));
+    loadCtrl();
+  }
+
+  async function cronRun(){
+    var resp = await fetch('/api/system/run', {method:'POST'});
+    if(!resp.ok){ toast('Run failed', true); return; }
+    toast('Cron triggered. Auto-refresh in ~30s.');
+  }
+
+  async function importMarket(market, btn){
+    btn.disabled = true;
+    var origText = btn.textContent;
+    btn.textContent = 'Importing...';
+    try {
+      var resp = await fetch('/api/system/import?market=' + market, {method:'POST'});
+      var body = await resp.json();
+      if(!resp.ok){ toast('Import failed: ' + (body.error || resp.statusText), true); return; }
+      toast(market + ': fetched ' + body.fetched + ', new tickers ' + body.inserted_tickers + ', new jobs ' + body.inserted_jobs);
+      load();
+    } catch(e){
+      toast('Import error: ' + (e && e.message), true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = origText;
+    }
   }
 
   document.getElementById('refresh').addEventListener('click', function(){ page = 1; load(); });
@@ -218,13 +311,25 @@ export const ADMIN_HTML = `<!doctype html>
   document.addEventListener('change', function(e){
     if(e.target && e.target.matches && e.target.matches('select')){ page = 1; load(); }
   });
+
   document.addEventListener('click', function(e){
-    var btn = e.target && e.target.closest && e.target.closest('button[data-action]');
-    if(btn) act(btn.dataset.ticker, btn.dataset.interval, btn.dataset.action);
+    var t = e.target;
+    if(!t || !t.closest) return;
+    var ctrlBtn = t.closest('button[data-action]');
+    if(ctrlBtn){
+      var act = ctrlBtn.dataset.action;
+      if(act === 'cron-toggle') return cronToggle();
+      if(act === 'cron-run') return cronRun();
+      return rowAction(ctrlBtn.dataset.ticker, ctrlBtn.dataset.interval, act);
+    }
+    var imp = t.closest('button[data-import]');
+    if(imp) return importMarket(imp.dataset.import, imp);
   });
 
+  loadCtrl();
   load();
   setInterval(load, 30000);
+  setInterval(loadCtrl, 30000);
 })();
 </script>
 </body>

@@ -10,6 +10,15 @@ import { fetchOHLCV } from './sources';
 const BATCH_SIZE = 20;
 
 export async function runScheduled(env: Env): Promise<void> {
+  // 先看运行期开关；admin 后台可在不重 deploy 的前提下暂停 cron
+  const flag = await env.market_data_lake
+    .prepare(`SELECT value FROM system_config WHERE key = 'cron_enabled'`)
+    .first<{ value: string }>();
+  if (flag?.value !== '1') {
+    console.log('[cron] disabled via system_config.cron_enabled, skipping');
+    return;
+  }
+
   const jobs = await pickOldestJobs(env, BATCH_SIZE);
   if (jobs.length === 0) return;
 

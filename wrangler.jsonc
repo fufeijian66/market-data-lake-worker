@@ -6,10 +6,11 @@
 	"compatibility_date": "2025-04-01",
 	// 使用 aws4fetch（纯 fetch + SigV4），不依赖 Node API，所以不开 nodejs_compat。
 	// 移除 nodejs_compat 也避开了它对 module 加载语义的潜在副作用。
-	// Cron Triggers：每 15 分钟一批；20 条/批，CPU 时间通常 2~10 秒
+	// Cron Triggers：每 5 分钟一批；20 条/批，CPU 时间通常 2~10 秒
+	// 改 schedule 必须重 deploy；运行期开关在 admin 后台（system_config.cron_enabled）
 	"triggers": {
 		"crons": [
-			"*/15 * * * *"
+			"*/5 * * * *"
 		]
 	},
 	// D1 绑定：先用 `wrangler d1 create market-data-lake` 创建库，再把返回的 id 填到下面
