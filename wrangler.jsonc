@@ -35,8 +35,8 @@
 		"S3_REGION": "oss-cn-shanghai",
 		"S3_BUCKET": "market-data-cf",
 		// —— Cloudflare Access ——
-		"ACCESS_TEAM_DOMAIN": "yourteam.cloudflareaccess.com",
-		"ACCESS_AUD": "REPLACE_WITH_AUDIENCE_TAG",
+		"ACCESS_TEAM_DOMAIN": "newone1997.cloudflareaccess.com",
+		"ACCESS_AUD": "2189fa861234855f5f55eb3679bac31bd7cd715aa6a9108666628001f7df5d14",
 		// 本地 wrangler dev 时建议在 `.dev.vars` 中覆盖为 development，access-auth 中间件会自动跳过
 		"ENVIRONMENT": "production"
 	}
