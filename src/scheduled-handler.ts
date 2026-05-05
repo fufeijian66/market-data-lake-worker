@@ -7,39 +7,66 @@ import type { Env, TickerJob } from './types';
 import { createS3Client, mergeAndUpload, objectKey, type S3Ctx } from './s3';
 import { fetchOHLCV } from './sources';
 
-const BATCH_SIZE = 20;
+// Workers Free tier 限制：50 subrequests/invocation。每个 job 需要 4 个 subrequest
+// (fetchOHLCV + S3 GET + S3 PUT + D1 UPDATE)，所以 BATCH_SIZE * 4 + 2(init queries) <= 50。
+// 10 × 4 + 2 = 42，留 8 的 buffer。Workers Paid（$5/mo, 1000 subreq）可调到 50+。
+const BATCH_SIZE = 10;
 
-export async function runScheduled(env: Env): Promise<void> {
-  // 运行期开关；admin 后台可不重 deploy 暂停 cron
+export async function runScheduled(env: Env): Promise<{
+  picked: number;
+  succeeded: number;
+  failed: number;
+}> {
   const flag = await env.market_data_lake
     .prepare(`SELECT value FROM system_config WHERE key = 'cron_enabled'`)
     .first<{ value: string }>();
   if (flag?.value !== '1') {
     console.log('[cron] disabled via system_config.cron_enabled, skipping');
-    return;
+    return { picked: 0, succeeded: 0, failed: 0 };
   }
 
   const jobs = await pickOldestJobs(env, BATCH_SIZE);
-  if (jobs.length === 0) return;
+  console.log(`[cron] picked ${jobs.length} jobs`);
+  if (jobs.length === 0) return { picked: 0, succeeded: 0, failed: 0 };
 
   const s3 = createS3Client(env);
-  await Promise.allSettled(jobs.map((job) => fetchOneJob(env, s3, job)));
+  const results = await Promise.allSettled(jobs.map((job) => fetchOneJob(env, s3, job)));
+
+  let succeeded = 0;
+  let failed = 0;
+  for (const r of results) {
+    if (r.status === 'fulfilled' && r.value === true) succeeded++;
+    else failed++;
+  }
+  console.log(`[cron] done: ${succeeded} ok, ${failed} failed`);
+  return { picked: jobs.length, succeeded, failed };
 }
 
 /**
  * 抓取并合并单个 (ticker, interval) 作业。
  * 由 cron 批处理 与 admin "Fetch now" 按钮共用。
  * 异常自吞并写入 D1 error_*，不会向上抛。
+ * 返回 true 表示成功、false 表示失败（用于上层统计）。
  */
-export async function fetchOneJob(env: Env, s3: S3Ctx, job: TickerJob): Promise<void> {
+export async function fetchOneJob(env: Env, s3: S3Ctx, job: TickerJob): Promise<boolean> {
+  const tag = `${job.market}/${job.interval}/${job.ticker}`;
   try {
     const fresh = await fetchOHLCV(job.market, job.ticker, job.interval);
     const key = objectKey(job.market, job.interval, job.ticker);
     const result = await mergeAndUpload(s3, key, fresh);
     await markSuccess(env, job, result);
+    console.log(`[fetch] ${tag}: ok total=${result.total} (+${result.newlyAdded})`);
+    return true;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    await markFailure(env, job, msg);
+    console.log(`[fetch] ${tag}: FAILED ${msg.slice(0, 200)}`);
+    try {
+      await markFailure(env, job, msg);
+    } catch (markErr) {
+      // markFailure 自身也可能因 subrequest 限额失败 — 不抛
+      console.log(`[fetch] ${tag}: markFailure also failed: ${markErr instanceof Error ? markErr.message : markErr}`);
+    }
+    return false;
   }
 }
 

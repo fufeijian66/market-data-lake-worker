@@ -56,6 +56,7 @@ async function handleApi(req: Request, env: Env, ctx: ExecutionContext, url: URL
   if (method === 'GET' && path === '/api/system') return apiSystemGet(env);
   if (method === 'POST' && path === '/api/system/cron/toggle') return apiSystemCronToggle(env);
   if (method === 'POST' && path === '/api/system/run') return apiSystemRun(env, ctx);
+  if (method === 'POST' && path === '/api/system/run-sync') return apiSystemRunSync(env);
   if (method === 'POST' && path === '/api/system/import') return apiSystemImport(env, url);
   if (method === 'POST' && path === '/api/system/fetch-bulk') return apiFetchBulk(env, ctx, req);
 
@@ -219,8 +220,14 @@ async function apiSystemCronToggle(env: Env): Promise<Response> {
 
 /** 立即手动触发一次抓取批次（不等结果，dashboard 30s 自动刷新可见） */
 async function apiSystemRun(env: Env, ctx: ExecutionContext): Promise<Response> {
-  ctx.waitUntil(runScheduled(env));
+  ctx.waitUntil(runScheduled(env).then(() => undefined));
   return jsonOk({ ok: true, message: 'Cron run triggered in background' });
+}
+
+/** 同步跑一波，等结果返回 —— 诊断用，能直接看到 picked/succeeded/failed 计数 */
+async function apiSystemRunSync(env: Env): Promise<Response> {
+  const result = await runScheduled(env);
+  return jsonOk(result);
 }
 
 /**
