@@ -241,8 +241,9 @@ export const ADMIN_HTML = `<!doctype html>
       if(r.error_message){
         tdStatus.appendChild(el('span', {
           className: 'err-msg',
-          text: '⚠ ' + String(r.error_message).slice(0, 80),
-          title: r.error_message,
+          text: '⚠ ' + r.error_message,
+          title: r.error_message + '\\n\\n（点击复制）',
+          data: { copy: r.error_message },
         }));
       }
       tr.appendChild(tdStatus);
@@ -315,6 +316,22 @@ export const ADMIN_HTML = `<!doctype html>
   document.addEventListener('click', function(e){
     var t = e.target;
     if(!t || !t.closest) return;
+
+    // 点错误信息复制全文
+    var errEl = t.closest('.err-msg[data-copy]');
+    if(errEl){
+      var msg = errEl.dataset.copy;
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(msg).then(
+          function(){ toast('Error message copied'); },
+          function(){ fallbackCopy(msg); }
+        );
+      } else {
+        fallbackCopy(msg);
+      }
+      return;
+    }
+
     var ctrlBtn = t.closest('button[data-action]');
     if(ctrlBtn){
       var act = ctrlBtn.dataset.action;
@@ -325,6 +342,19 @@ export const ADMIN_HTML = `<!doctype html>
     var imp = t.closest('button[data-import]');
     if(imp) return importMarket(imp.dataset.import, imp);
   });
+
+  function fallbackCopy(text){
+    // 老浏览器或非 https 域名时降级：用临时 textarea + execCommand
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); toast('Error message copied'); }
+    catch(e){ toast('Copy failed; long-press to select text', true); }
+    document.body.removeChild(ta);
+  }
 
   loadCtrl();
   load();

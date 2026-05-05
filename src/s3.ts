@@ -38,10 +38,15 @@ export function objectKey(market: string, interval: string, ticker: string): str
   return `${market}/${interval}/${ticker}.csv`;
 }
 
-/** path-style URL：兼容性最好（R2 / OSS / MinIO 全部支持） */
+/**
+ * Virtual-hosted style URL：https://{bucket}.{endpoint-host}/{key}
+ * 阿里云 OSS S3 兼容接口**强制**要求 virtual-hosted style；AWS S3 / R2 / MinIO 也都支持，
+ * 所以无脑选这个最兼容（path-style 在 OSS 上会返回 403 AccessDenied）。
+ */
 function objectUrl(ctx: S3Ctx, key: string): string {
+  const u = new URL(ctx.endpoint);
   const encoded = key.split('/').map(encodeURIComponent).join('/');
-  return `${ctx.endpoint}/${ctx.bucket}/${encoded}`;
+  return `${u.protocol}//${ctx.bucket}.${u.host}/${encoded}`;
 }
 
 function parseCsv(text: string): OHLCV[] {
