@@ -57,7 +57,8 @@ export async function fetchEastmoney(symbol: string, interval: Interval): Promis
   url.searchParams.set('klt', String(KLT[interval]));
   url.searchParams.set('fqt', '1'); // 前复权
   url.searchParams.set('end', '20500101');
-  url.searchParams.set('lmt', '1023');
+  // 东方财富对 lmt 限制宽松；10000 对日线 ≈ 40 年，足够拉到上市首日
+  url.searchParams.set('lmt', '10000');
 
   const resp = await fetch(url.toString(), { headers: { 'User-Agent': pickUA() } });
   if (!resp.ok) throw new Error(`Eastmoney ${symbol} ${interval} HTTP ${resp.status}`);

@@ -13,14 +13,15 @@ function pickUA(): string {
 }
 
 // Yahoo 的历史窗口 vs 粒度限制（agent-spec.md「已知约束」节）
+// 大粒度（1d/1wk/1mo）改 'max' 拉全部历史（可达 30+ 年），小粒度仍受 Yahoo 服务端约束
 const RANGE_FOR_INTERVAL: Record<Interval, string> = {
   '1m':  '7d',
   '5m':  '60d',
   '15m': '60d',
   '30m': '60d',
   '1h':  '730d',
-  '1d':  '5y',
-  '1wk': '10y',
+  '1d':  'max',
+  '1wk': 'max',
   '1mo': 'max',
 };
 
