@@ -219,7 +219,7 @@ LLM 经常默默选择一种解释然后执行。这个原则强制明确推理�
 | 文件 | 说明 |
 |------|------|
 | `package.json` | 依赖 `@aws-sdk/client-s3`（必需）+ TypeScript / Wrangler 工具链 |
-| `wrangler.jsonc` | D1 binding（`DB`）、Cron Triggers、`vars`（含 `ACCESS_*`、`S3_*`）、`compatibility_flags: ["nodejs_compat"]` |
+| `wrangler.jsonc` | D1 binding（`market_data_lake`）、Cron Triggers、`vars`（含 `ACCESS_*`、`S3_*`）、`compatibility_flags: ["nodejs_compat"]` |
 | `schema.sql` | `tickers` + `ticker_intervals` 双表 + 必要索引（`(is_active, last_updated_at)` 复合索引） |
 | `src/index.ts` | 入口，导出 `fetch` 与 `scheduled` |
 | `src/scheduled-handler.ts` | Cron 抓取主流程 |

@@ -57,7 +57,7 @@
 ```bash
 npm install
 wrangler dev                                          # 本地调试
-wrangler d1 execute DB --file=./schema.sql            # 初始化 D1
+wrangler d1 execute market_data_lake --file=./schema.sql  # 初始化 D1
 wrangler secret put S3_ACCESS_KEY_ID                  # 敏感项进 secret
 wrangler secret put S3_SECRET_ACCESS_KEY
 wrangler deploy

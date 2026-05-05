@@ -79,7 +79,7 @@ function jsonErr(error: string, status: number): Response {
 // ---- handlers ---------------------------------------------------------------
 
 async function apiHealth(env: Env): Promise<Response> {
-  const r = await env.DB.prepare(
+  const r = await env.market_data_lake.prepare(
     `SELECT
        COUNT(*)                                                AS total,
        COALESCE(SUM(CASE WHEN is_active = 1 AND error_flag = 0 THEN 1 ELSE 0 END), 0) AS active,
@@ -115,12 +115,12 @@ async function apiJobsList(env: Env, url: URL): Promise<Response> {
                  LIMIT ? OFFSET ?`;
   params.push(pageSize, (page - 1) * pageSize);
 
-  const { results } = await env.DB.prepare(sql).bind(...params).all();
+  const { results } = await env.market_data_lake.prepare(sql).bind(...params).all();
   return jsonOk({ data: results ?? [], page, pageSize });
 }
 
 async function apiJobDetail(env: Env, ticker: string, interval: string): Promise<Response> {
-  const row = await env.DB.prepare(
+  const row = await env.market_data_lake.prepare(
     `SELECT ti.ticker, t.market, ti.interval, ti.is_active, ti.last_updated_at,
             ti.error_flag, ti.error_message, ti.error_count
        FROM ticker_intervals ti
@@ -138,7 +138,7 @@ async function apiJobDetail(env: Env, ticker: string, interval: string): Promise
 }
 
 async function apiSetActive(env: Env, ticker: string, interval: string, value: 0 | 1): Promise<Response> {
-  const r = await env.DB.prepare(
+  const r = await env.market_data_lake.prepare(
     `UPDATE ticker_intervals SET is_active = ? WHERE ticker = ? AND interval = ?`,
   )
     .bind(value, ticker, interval)
@@ -149,7 +149,7 @@ async function apiSetActive(env: Env, ticker: string, interval: string, value: 0
 
 async function apiRetry(env: Env, ticker: string, interval: string): Promise<Response> {
   // 清错误标记 + 把 last_updated_at 设为 0 → 下一轮 Cron 优先抓
-  const r = await env.DB.prepare(
+  const r = await env.market_data_lake.prepare(
     `UPDATE ticker_intervals
         SET error_flag = 0,
             error_message = NULL,

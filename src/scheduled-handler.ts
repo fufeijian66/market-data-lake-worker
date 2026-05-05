@@ -31,7 +31,7 @@ export async function runScheduled(env: Env): Promise<void> {
 }
 
 async function pickOldestJobs(env: Env, n: number): Promise<TickerJob[]> {
-  const { results } = await env.DB.prepare(
+  const { results } = await env.market_data_lake.prepare(
     `SELECT ti.ticker, ti.interval, ti.is_active, ti.last_updated_at,
             ti.error_flag, ti.error_message, ti.error_count, t.market
        FROM ticker_intervals ti
@@ -46,7 +46,7 @@ async function pickOldestJobs(env: Env, n: number): Promise<TickerJob[]> {
 }
 
 async function markSuccess(env: Env, job: TickerJob): Promise<void> {
-  await env.DB.prepare(
+  await env.market_data_lake.prepare(
     `UPDATE ticker_intervals
         SET last_updated_at = ?,
             error_flag = 0,
@@ -62,7 +62,7 @@ async function markSuccess(env: Env, job: TickerJob): Promise<void> {
  * error_count 单调递增，运维侧通过后台手动 retry 来归零。
  */
 async function markFailure(env: Env, job: TickerJob, msg: string): Promise<void> {
-  await env.DB.prepare(
+  await env.market_data_lake.prepare(
     `UPDATE ticker_intervals
         SET error_flag = 1,
             error_message = ?,

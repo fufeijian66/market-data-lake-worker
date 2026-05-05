@@ -16,7 +16,7 @@ export interface OHLCV {
 
 // Worker env 绑定（与 wrangler.jsonc 的 vars / D1 binding 对齐）
 export interface Env {
-  DB: D1Database;
+  market_data_lake: D1Database;
 
   // S3（公开 vars）
   S3_ENDPOINT: string;
