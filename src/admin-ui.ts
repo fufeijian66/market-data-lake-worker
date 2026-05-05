@@ -296,6 +296,9 @@ export const ADMIN_HTML = `<!doctype html>
   async function rowAction(ticker, interval, action){
     var resp = await fetch('/api/jobs/' + encodeURIComponent(ticker) + '/' + encodeURIComponent(interval) + '/' + action, {method: 'POST'});
     if(!resp.ok){ toast('Failed: ' + (await resp.text()), true); return; }
+    if(action === 'fetch'){
+      toast('Fetch ' + ticker + ' ' + interval + ' triggered. Auto-refresh in ~30s.');
+    }
     load();
   }
 
