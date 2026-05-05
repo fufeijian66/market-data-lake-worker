@@ -1,11 +1,7 @@
 // 管理后台单页 HTML（vanilla JS，零前端构建）
 // 通过 /api/* 调用后端；动态渲染只用 createElement + textContent，杜绝 innerHTML 注入
-//
-// 控制面板（顶部）能力：
-//   - 显示 cron schedule（来自 wrangler.jsonc，D1 仅做镜像展示）
-//   - cron 启停开关（runtime D1 标记；scheduled-handler 启动时检查）
-//   - 立即手动触发一次抓取
-//   - 一键导入 US / HK / CN 全市场标的清单
+
+import { EXPECTED_BARS } from './constants';
 
 export const ADMIN_HTML = `<!doctype html>
 <html lang="zh-CN">
@@ -88,14 +84,18 @@ export const ADMIN_HTML = `<!doctype html>
     <option value="error">Error</option>
   </select>
   <button id="refresh">Refresh</button>
+  <span style="flex:1"></span>
+  <button id="bulk-selected" disabled>Fetch selected (0)</button>
+  <button id="bulk-all" class="primary">Fetch all matching</button>
 </div>
 
 <table>
   <thead><tr>
+    <th style="width:30px"><input id="select-all" type="checkbox" title="选中本页全部"></th>
     <th>Ticker / Name</th><th>Market</th><th>Interval</th><th>Status</th>
     <th>Data range</th><th>Last updated</th><th>Progress</th><th>Errors</th><th>Actions</th>
   </tr></thead>
-  <tbody id="rows"><tr><td colspan="9">Loading...</td></tr></tbody>
+  <tbody id="rows"><tr><td colspan="10">Loading...</td></tr></tbody>
 </table>
 
 <div class="pager">
@@ -132,7 +132,7 @@ export const ADMIN_HTML = `<!doctype html>
 
   function emptyRow(text, color){
     var tr = document.createElement('tr');
-    var td = el('td', {className:'empty', text:text, attrs:{colspan:'9'}});
+    var td = el('td', {className:'empty', text:text, attrs:{colspan:'10'}});
     if(color) td.style.color = color;
     tr.appendChild(td);
     return tr;
@@ -147,32 +147,19 @@ export const ADMIN_HTML = `<!doctype html>
     return s;
   }
 
-  // 各 interval 抓全的目标条数（理论"满格"参考）：
-  //   1d  ≈ 20 年 × 252 = 5040       (Yahoo max / 东财 lmt=10000 都能覆盖)
-  //   1wk ≈ 20 年 × 52  = 1040
-  //   1mo ≈ 20 年 × 12  = 240
-  //   1h  / 730d        ≈ 3300
-  //   30m / 60d         ≈ 540
-  //   15m / 60d         ≈ 1080
-  //   5m  / 60d         ≈ 3240
-  //   1m  / 7d          ≈ 1880
-  // 老股票（>20 年）会到 100% 后封顶；新上市股票即便拉满也只到部分占比，这是正常的——
-  // 进度反映的是"相对 20 年完整历史"的覆盖度。
-  var EXPECTED_BARS = {
-    '1m':  1880,
-    '5m':  3240,
-    '15m': 1080,
-    '30m': 540,
-    '1h':  3300,
-    '1d':  5040,
-    '1wk': 1040,
-    '1mo': 240,
-  };
+  // 各 interval 满格目标（与后端共享，由 src/constants.ts 注入）
+  var EXPECTED_BARS = ${JSON.stringify(EXPECTED_BARS)};
+
+  function isFull(rowCount, interval){
+    var target = EXPECTED_BARS[interval] || Infinity;
+    return (rowCount || 0) >= target;
+  }
 
   function progressCell(rowCount, interval){
     var target = EXPECTED_BARS[interval] || 1;
     var n = rowCount || 0;
-    var pct = Math.min(100, Math.round(n / target * 100));
+    var full = n >= target;
+    var pct = full ? 100 : Math.round(n / target * 100);
     var td = document.createElement('td');
     var bar = el('div', {className: 'bar'});
     var cls = 'bar-inner';
@@ -181,9 +168,22 @@ export const ADMIN_HTML = `<!doctype html>
     var inner = el('div', {className: cls, style: { width: pct + '%' }});
     bar.appendChild(inner);
     td.appendChild(bar);
-    td.appendChild(el('span', {className: 'progress-text', text: n + ' / ' + target + ' (' + pct + '%)'}));
+    // 满格时简化文本 'N (100%)'，避免 6590/5040 这种"分子大于分母"的怪异显示
+    var text = full ? n + ' (100%)' : n + ' / ' + target + ' (' + pct + '%)';
+    td.appendChild(el('span', {className: 'progress-text', text: text}));
     return td;
   }
+
+  // —— 多选状态（跨翻页保留）——
+  var selected = new Set();
+  function selKey(t, i){ return t + '|' + i; }
+  function updateBulkBtn(){
+    var btn = document.getElementById('bulk-selected');
+    btn.textContent = 'Fetch selected (' + selected.size + ')';
+    btn.disabled = selected.size === 0;
+  }
+  // 当前可见的行缓存（用于全选 / 单选切换）
+  var currentRows = [];
 
   function toast(msg, isError){
     var t = el('div', {className:'toast', text: msg});
@@ -274,15 +274,27 @@ export const ADMIN_HTML = `<!doctype html>
   }
 
   function renderRows(rows){
+    currentRows = rows;
     var tbody = document.getElementById('rows');
     tbody.replaceChildren();
     if(rows.length === 0){
       tbody.appendChild(emptyRow('No jobs'));
+      document.getElementById('select-all').checked = false;
       return;
     }
     for(var i = 0; i < rows.length; i++){
       var r = rows[i];
       var tr = document.createElement('tr');
+
+      // checkbox
+      var tdCb = document.createElement('td');
+      var cb = el('input', { attrs: { type: 'checkbox' } });
+      cb.checked = selected.has(selKey(r.ticker, r.interval));
+      cb.dataset.ticker = r.ticker;
+      cb.dataset.interval = r.interval;
+      cb.classList.add('row-cb');
+      tdCb.appendChild(cb);
+      tr.appendChild(tdCb);
 
       var tdTicker = document.createElement('td');
       tdTicker.appendChild(el('b', {text: r.ticker}));
@@ -324,11 +336,16 @@ export const ADMIN_HTML = `<!doctype html>
         data: { action: r.is_active ? 'pause' : 'resume', ticker: r.ticker, interval: r.interval },
       }));
       tdAct.appendChild(document.createTextNode(' '));
-      tdAct.appendChild(el('button', {
+      var fetchBtn = el('button', {
         className: 'primary',
         text: 'Fetch',
         data: { action: 'fetch', ticker: r.ticker, interval: r.interval },
-      }));
+      });
+      if(isFull(r.row_count, r.interval)){
+        fetchBtn.disabled = true;
+        fetchBtn.title = '已 100%；cron 仍会自动追新 K 线';
+      }
+      tdAct.appendChild(fetchBtn);
       tr.appendChild(tdAct);
 
       tbody.appendChild(tr);
@@ -358,6 +375,50 @@ export const ADMIN_HTML = `<!doctype html>
     toast('Cron triggered. Auto-refresh in ~30s.');
   }
 
+  async function fetchBulk(payload, btn){
+    btn.disabled = true;
+    var orig = btn.textContent;
+    btn.textContent = 'Queueing...';
+    try {
+      var resp = await fetch('/api/system/fetch-bulk', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      var body = await resp.json();
+      if(!resp.ok){ toast('Failed: ' + (body.error || resp.statusText), true); return; }
+      toast('Matched ' + body.matched + ' · queued ' + body.queued + ' · skipped (100%) ' + body.skipped + '. Cron will sweep through.');
+      selected.clear();
+      updateBulkBtn();
+      load();
+    } catch(e){
+      toast('Bulk fetch error: ' + (e && e.message), true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = orig;
+    }
+  }
+
+  function fetchSelected(){
+    if(selected.size === 0) return;
+    var tickers = [];
+    selected.forEach(function(k){
+      var parts = k.split('|');
+      tickers.push({ ticker: parts[0], interval: parts[1] });
+    });
+    fetchBulk({ scope: 'list', tickers: tickers }, document.getElementById('bulk-selected'));
+  }
+
+  function fetchAllMatching(){
+    var filter = {
+      market:   document.getElementById('market').value || undefined,
+      interval: document.getElementById('interval').value || undefined,
+      status:   document.getElementById('status').value || undefined,
+      q:        document.getElementById('search').value.trim() || undefined,
+    };
+    fetchBulk({ scope: 'filter', filter: filter }, document.getElementById('bulk-all'));
+  }
+
   async function importMarket(market, btn){
     btn.disabled = true;
     var origText = btn.textContent;
@@ -379,6 +440,8 @@ export const ADMIN_HTML = `<!doctype html>
   document.getElementById('refresh').addEventListener('click', function(){ page = 1; load(); });
   document.getElementById('prev').addEventListener('click', function(){ page = Math.max(1, page - 1); load(); });
   document.getElementById('next').addEventListener('click', function(){ page = page + 1; load(); });
+  document.getElementById('bulk-selected').addEventListener('click', fetchSelected);
+  document.getElementById('bulk-all').addEventListener('click', fetchAllMatching);
   document.addEventListener('change', function(e){
     if(e.target && e.target.matches && e.target.matches('select')){ page = 1; load(); }
   });
@@ -388,6 +451,30 @@ export const ADMIN_HTML = `<!doctype html>
   document.getElementById('search').addEventListener('input', function(){
     if(searchTimer) clearTimeout(searchTimer);
     searchTimer = setTimeout(function(){ page = 1; load(); }, 300);
+  });
+
+  // 行内 checkbox：勾选/取消
+  document.addEventListener('change', function(e){
+    var t = e.target;
+    if(t && t.classList && t.classList.contains('row-cb')){
+      var key = selKey(t.dataset.ticker, t.dataset.interval);
+      if(t.checked) selected.add(key); else selected.delete(key);
+      updateBulkBtn();
+    }
+  });
+
+  // 全选 / 全反选（仅作用于当前页可见行）
+  document.getElementById('select-all').addEventListener('change', function(e){
+    var on = e.target.checked;
+    for(var i = 0; i < currentRows.length; i++){
+      var r = currentRows[i];
+      var key = selKey(r.ticker, r.interval);
+      if(on) selected.add(key); else selected.delete(key);
+    }
+    // 同步 checkbox 状态
+    var cbs = document.querySelectorAll('input.row-cb');
+    for(var j = 0; j < cbs.length; j++) cbs[j].checked = on;
+    updateBulkBtn();
   });
 
   document.addEventListener('click', function(e){

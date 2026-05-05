@@ -1,12 +1,13 @@
 // HTTP 路由分发：/admin（HTML） + /api/*（JSON）
 // 任何路由进入业务逻辑前必先过 access-auth 中间件（架构红线 #9）
 
-import type { Env, JobRow, Market, TickerJob } from './types';
+import type { Env, JobRow, Market, TickerJob, Interval } from './types';
 import { requireAccess } from './access-auth';
 import { createS3Client, objectKey, tailCsv } from './s3';
 import { ADMIN_HTML } from './admin-ui';
 import { runScheduled, fetchOneJob } from './scheduled-handler';
 import { fetchListings } from './sources/listings';
+import { EXPECTED_BARS } from './constants';
 
 export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(req.url);
@@ -56,6 +57,7 @@ async function handleApi(req: Request, env: Env, ctx: ExecutionContext, url: URL
   if (method === 'POST' && path === '/api/system/cron/toggle') return apiSystemCronToggle(env);
   if (method === 'POST' && path === '/api/system/run') return apiSystemRun(env, ctx);
   if (method === 'POST' && path === '/api/system/import') return apiSystemImport(env, url);
+  if (method === 'POST' && path === '/api/system/fetch-bulk') return apiFetchBulk(env, ctx, req);
 
   // /api/jobs/:ticker/:interval[/(pause|resume|fetch)]
   const m = path.match(/^\/api\/jobs\/([^/]+)\/([^/]+)(?:\/(pause|resume|fetch))?$/);
@@ -278,5 +280,96 @@ async function apiSystemImport(env: Env, url: URL): Promise<Response> {
     fetched: items.length,
     inserted_tickers: insertedTickers,
     inserted_jobs: insertedJobs,
+  });
+}
+
+/**
+ * 批量 / 全部 Fetch：把候选行的 last_updated_at 置 0 → cron 下一波优先抓；并立即触发一次 runScheduled。
+ * 自动跳过 row_count 已 ≥ EXPECTED_BARS[interval] 的"满格"行。
+ *
+ * Body 两种模式：
+ *   { scope: 'list', tickers: [{ticker, interval}, ...] }   —— UI 多选
+ *   { scope: 'filter', filter: { market?, interval?, status?, q? } } —— Fetch all matching
+ */
+async function apiFetchBulk(env: Env, ctx: ExecutionContext, req: Request): Promise<Response> {
+  type Body = {
+    scope?: 'list' | 'filter';
+    filter?: { market?: string; interval?: string; status?: string; q?: string };
+    tickers?: Array<{ ticker: string; interval: string }>;
+  };
+  const body = (await req.json().catch(() => ({}))) as Body;
+
+  type Cand = { ticker: string; interval: Interval; row_count: number };
+  let candidates: Cand[] = [];
+
+  if (body.scope === 'list' && body.tickers && body.tickers.length > 0) {
+    // 用 (ticker, interval) IN VALUES，按 40 行/批避开 100 占位符上限
+    const CHUNK = 40;
+    for (let i = 0; i < body.tickers.length; i += CHUNK) {
+      const chunk = body.tickers.slice(i, i + CHUNK);
+      const ph = chunk.map(() => '(?, ?)').join(',');
+      const p = chunk.flatMap((t) => [t.ticker, t.interval]);
+      const { results } = await env.market_data_lake
+        .prepare(
+          `SELECT ticker, interval, row_count FROM ticker_intervals
+            WHERE (ticker, interval) IN (VALUES ${ph})`,
+        )
+        .bind(...p)
+        .all<Cand>();
+      candidates.push(...(results ?? []));
+    }
+  } else {
+    // filter 模式（默认）
+    const where: string[] = [];
+    const params: unknown[] = [];
+    const f = body.filter ?? {};
+    if (f.market) { where.push('t.market = ?'); params.push(f.market); }
+    if (f.interval) { where.push('ti.interval = ?'); params.push(f.interval); }
+    if (f.status === 'active') where.push('ti.is_active = 1 AND ti.error_flag = 0');
+    else if (f.status === 'paused') where.push('ti.is_active = 0');
+    else if (f.status === 'error') where.push('ti.error_flag = 1');
+    else where.push('ti.is_active = 1'); // 默认仅活跃
+    if (f.q) {
+      const esc = f.q.replace(/[\\%_]/g, (c) => '\\' + c);
+      const pat = `%${esc}%`;
+      where.push("(ti.ticker LIKE ? ESCAPE '\\' OR t.name LIKE ? ESCAPE '\\')");
+      params.push(pat, pat);
+    }
+    const sql = `SELECT ti.ticker, ti.interval, ti.row_count
+                   FROM ticker_intervals ti
+                   JOIN tickers t ON t.ticker = ti.ticker
+                  WHERE ${where.join(' AND ')}`;
+    const { results } = await env.market_data_lake.prepare(sql).bind(...params).all<Cand>();
+    candidates = results ?? [];
+  }
+
+  // 跳过已达 100%
+  const eligible = candidates.filter(
+    (c) => (c.row_count ?? 0) < (EXPECTED_BARS[c.interval] ?? Infinity),
+  );
+  const skipped = candidates.length - eligible.length;
+
+  // 批量 promote 到队列头：last_updated_at = 0
+  const CHUNK = 40;
+  for (let i = 0; i < eligible.length; i += CHUNK) {
+    const chunk = eligible.slice(i, i + CHUNK);
+    const ph = chunk.map(() => '(?, ?)').join(',');
+    const p = chunk.flatMap((c) => [c.ticker, c.interval]);
+    await env.market_data_lake
+      .prepare(
+        `UPDATE ticker_intervals SET last_updated_at = 0
+          WHERE (ticker, interval) IN (VALUES ${ph})`,
+      )
+      .bind(...p)
+      .run();
+  }
+
+  // 立刻拉一波（runScheduled 会取 last_updated_at 最旧的 20 条 = 我们刚 promote 的）
+  if (eligible.length > 0) ctx.waitUntil(runScheduled(env));
+
+  return jsonOk({
+    matched: candidates.length,
+    queued: eligible.length,
+    skipped,
   });
 }
