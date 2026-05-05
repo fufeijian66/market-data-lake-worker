@@ -44,6 +44,11 @@ export const ADMIN_HTML = `<!doctype html>
   .err-msg{color:#a50e0e;font-size:11px;display:block;margin-top:2px;max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:help}
   .empty{text-align:center;color:#888;padding:24px}
   .toast{position:fixed;right:24px;top:24px;background:#222;color:#fff;padding:10px 14px;border-radius:6px;font-size:13px;box-shadow:0 4px 12px rgba(0,0,0,.2);max-width:360px;z-index:10}
+  .bar{display:inline-block;width:90px;height:8px;background:#eee;border-radius:4px;overflow:hidden;vertical-align:middle}
+  .bar-inner{height:100%;background:#137333;transition:width .3s}
+  .bar-inner.warn{background:#f9ab00}
+  .bar-inner.low{background:#a50e0e}
+  .progress-text{margin-left:6px;font-size:11px;color:#666;vertical-align:middle}
 </style>
 </head>
 <body>
@@ -88,7 +93,7 @@ export const ADMIN_HTML = `<!doctype html>
 <table>
   <thead><tr>
     <th>Ticker / Name</th><th>Market</th><th>Interval</th><th>Status</th>
-    <th>Data range</th><th>Last updated</th><th>Bars</th><th>Errors</th><th>Actions</th>
+    <th>Data range</th><th>Last updated</th><th>Progress</th><th>Errors</th><th>Actions</th>
   </tr></thead>
   <tbody id="rows"><tr><td colspan="9">Loading...</td></tr></tbody>
 </table>
@@ -133,7 +138,6 @@ export const ADMIN_HTML = `<!doctype html>
     return tr;
   }
 
-  // 把 ISO 8601 缩成 'YYYY-MM-DD' 或 'YYYY-MM-DD HH:mm'（看需要）
   function fmtDate(iso, withTime){
     if(!iso) return '—';
     var d = new Date(iso);
@@ -141,6 +145,43 @@ export const ADMIN_HTML = `<!doctype html>
     var s = d.toISOString().slice(0, 10);
     if(withTime) s += ' ' + d.toISOString().slice(11, 16);
     return s;
+  }
+
+  // 各 interval 抓全的目标条数，对齐 src/sources/yahoo.ts 的 RANGE_FOR_INTERVAL：
+  //   1d  / 5y    ≈ 252 trading days × 5  = 1260
+  //   1h  / 730d  ≈ 6.5 hr/day × 252/365 × 730 ≈ 3300
+  //   30m / 60d   ≈ 13 × 60·252/365 ≈ 540
+  //   15m / 60d   ≈ 26 × ...        ≈ 1080
+  //   5m  / 60d   ≈ 78 × ...        ≈ 3240
+  //   1m  / 7d    ≈ 390 × 7·252/365 ≈ 1880
+  //   1wk / 10y   ≈ 52 × 10         = 520
+  //   1mo / max（取保守 50 年）     = 600
+  // 这些是粗估的"理论上限"；实际可能略多/略少。仅作为进度条参考刻度。
+  var EXPECTED_BARS = {
+    '1m':  1880,
+    '5m':  3240,
+    '15m': 1080,
+    '30m': 540,
+    '1h':  3300,
+    '1d':  1260,
+    '1wk': 520,
+    '1mo': 600,
+  };
+
+  function progressCell(rowCount, interval){
+    var target = EXPECTED_BARS[interval] || 1;
+    var n = rowCount || 0;
+    var pct = Math.min(100, Math.round(n / target * 100));
+    var td = document.createElement('td');
+    var bar = el('div', {className: 'bar'});
+    var cls = 'bar-inner';
+    if(pct < 30) cls += ' low';
+    else if(pct < 80) cls += ' warn';
+    var inner = el('div', {className: cls, style: { width: pct + '%' }});
+    bar.appendChild(inner);
+    td.appendChild(bar);
+    td.appendChild(el('span', {className: 'progress-text', text: n + ' / ' + target + ' (' + pct + '%)'}));
+    return td;
   }
 
   function toast(msg, isError){
@@ -273,7 +314,7 @@ export const ADMIN_HTML = `<!doctype html>
       tr.appendChild(el('td', {text: rangeText, style:{fontSize:'12px',color:'#555'}}));
 
       tr.appendChild(el('td', {text: fmtTime(r.last_updated_at)}));
-      tr.appendChild(el('td', {text: r.row_count == null ? 0 : r.row_count}));
+      tr.appendChild(progressCell(r.row_count, r.interval));
       tr.appendChild(el('td', {text: r.error_count}));
 
       var tdAct = document.createElement('td');
