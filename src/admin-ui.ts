@@ -66,6 +66,7 @@ export const ADMIN_HTML = `<!doctype html>
 <div class="stats" id="stats">Loading...</div>
 
 <div class="filters">
+  <input id="search" type="search" placeholder="搜索 ticker / 名称（模糊）" style="min-width:240px">
   <select id="market">
     <option value="">All markets</option>
     <option>US</option><option>HK</option><option>CN</option>
@@ -87,9 +88,9 @@ export const ADMIN_HTML = `<!doctype html>
 <table>
   <thead><tr>
     <th>Ticker / Name</th><th>Market</th><th>Interval</th><th>Status</th>
-    <th>Last updated</th><th>Bars</th><th>Errors</th><th>Actions</th>
+    <th>Data range</th><th>Last updated</th><th>Bars</th><th>Errors</th><th>Actions</th>
   </tr></thead>
-  <tbody id="rows"><tr><td colspan="8">Loading...</td></tr></tbody>
+  <tbody id="rows"><tr><td colspan="9">Loading...</td></tr></tbody>
 </table>
 
 <div class="pager">
@@ -126,10 +127,20 @@ export const ADMIN_HTML = `<!doctype html>
 
   function emptyRow(text, color){
     var tr = document.createElement('tr');
-    var td = el('td', {className:'empty', text:text, attrs:{colspan:'8'}});
+    var td = el('td', {className:'empty', text:text, attrs:{colspan:'9'}});
     if(color) td.style.color = color;
     tr.appendChild(td);
     return tr;
+  }
+
+  // 把 ISO 8601 缩成 'YYYY-MM-DD' 或 'YYYY-MM-DD HH:mm'（看需要）
+  function fmtDate(iso, withTime){
+    if(!iso) return '—';
+    var d = new Date(iso);
+    if(isNaN(d.getTime())) return iso;
+    var s = d.toISOString().slice(0, 10);
+    if(withTime) s += ' ' + d.toISOString().slice(11, 16);
+    return s;
   }
 
   function toast(msg, isError){
@@ -176,10 +187,12 @@ export const ADMIN_HTML = `<!doctype html>
     var market = document.getElementById('market').value;
     var interval = document.getElementById('interval').value;
     var status = document.getElementById('status').value;
+    var q = document.getElementById('search').value.trim();
     var params = new URLSearchParams({page: String(page), pageSize: String(PAGE_SIZE)});
     if(market) params.set('market', market);
     if(interval) params.set('interval', interval);
     if(status) params.set('status', status);
+    if(q) params.set('q', q);
     document.getElementById('pageNum').textContent = String(page);
 
     var jobs, health;
@@ -252,6 +265,13 @@ export const ADMIN_HTML = `<!doctype html>
       }
       tr.appendChild(tdStatus);
 
+      // Data range：分粒度选择是否带 HH:mm
+      var subDaily = (r.interval === '1m' || r.interval === '5m' || r.interval === '15m' || r.interval === '30m' || r.interval === '1h');
+      var rangeText = (r.data_start_at || r.data_end_at)
+        ? fmtDate(r.data_start_at, subDaily) + ' → ' + fmtDate(r.data_end_at, subDaily)
+        : '—';
+      tr.appendChild(el('td', {text: rangeText, style:{fontSize:'12px',color:'#555'}}));
+
       tr.appendChild(el('td', {text: fmtTime(r.last_updated_at)}));
       tr.appendChild(el('td', {text: r.row_count == null ? 0 : r.row_count}));
       tr.appendChild(el('td', {text: r.error_count}));
@@ -263,9 +283,9 @@ export const ADMIN_HTML = `<!doctype html>
       }));
       tdAct.appendChild(document.createTextNode(' '));
       tdAct.appendChild(el('button', {
-        className: 'danger',
-        text: 'Retry',
-        data: { action: 'retry', ticker: r.ticker, interval: r.interval },
+        className: 'primary',
+        text: 'Fetch',
+        data: { action: 'fetch', ticker: r.ticker, interval: r.interval },
       }));
       tr.appendChild(tdAct);
 
@@ -316,6 +336,13 @@ export const ADMIN_HTML = `<!doctype html>
   document.getElementById('next').addEventListener('click', function(){ page = page + 1; load(); });
   document.addEventListener('change', function(e){
     if(e.target && e.target.matches && e.target.matches('select')){ page = 1; load(); }
+  });
+
+  // 搜索框：300ms debounce
+  var searchTimer = null;
+  document.getElementById('search').addEventListener('input', function(){
+    if(searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(function(){ page = 1; load(); }, 300);
   });
 
   document.addEventListener('click', function(e){

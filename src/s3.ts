@@ -107,12 +107,18 @@ async function putObject(ctx: S3Ctx, key: string, body: string, contentType: str
  * Read-Merge-Overwrite（架构红线 #6）：
  *   GET → 解析 CSV → 合并新数据 → 按 Datetime 去重升序 → PUT 覆盖
  *   404 当作空数组处理，不视为错误
+ *   返回值含整体范围（dataStart/dataEnd），由调用方写回 D1
  */
 export async function mergeAndUpload(
   ctx: S3Ctx,
   key: string,
   fresh: OHLCV[],
-): Promise<{ total: number; newlyAdded: number }> {
+): Promise<{
+  total: number;
+  newlyAdded: number;
+  dataStart: string | null;
+  dataEnd: string | null;
+}> {
   const got = await getObjectText(ctx, key);
   const existing = got.found ? parseCsv(got.text) : [];
 
@@ -125,7 +131,12 @@ export async function mergeAndUpload(
   );
 
   await putObject(ctx, key, toCsv(merged), 'text/csv; charset=utf-8');
-  return { total: merged.length, newlyAdded: merged.length - before };
+  return {
+    total: merged.length,
+    newlyAdded: merged.length - before,
+    dataStart: merged.length > 0 ? merged[0].Datetime : null,
+    dataEnd: merged.length > 0 ? merged[merged.length - 1].Datetime : null,
+  };
 }
 
 /** 取末尾 N 行 CSV，后台「单作业详情」预览用 */

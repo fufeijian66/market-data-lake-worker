@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS ticker_intervals (
   error_message   TEXT,                                  -- 最近一次失败的错误信息（截断 500 字）
   error_count     INTEGER NOT NULL DEFAULT 0,            -- 累计失败次数；retry 时清零
   row_count       INTEGER NOT NULL DEFAULT 0,            -- S3 中已存的 K 线条数（每次合并写入后回写）
+  data_start_at   TEXT,                                  -- ISO 8601，最早一根 K 线的 Datetime
+  data_end_at     TEXT,                                  -- ISO 8601，最新一根 K 线的 Datetime
   PRIMARY KEY (ticker, interval),
   FOREIGN KEY (ticker) REFERENCES tickers(ticker) ON DELETE CASCADE
 );

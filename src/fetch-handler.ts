@@ -1,11 +1,11 @@
 // HTTP 路由分发：/admin（HTML） + /api/*（JSON）
 // 任何路由进入业务逻辑前必先过 access-auth 中间件（架构红线 #9）
 
-import type { Env, JobRow, Market } from './types';
+import type { Env, JobRow, Market, TickerJob } from './types';
 import { requireAccess } from './access-auth';
 import { createS3Client, objectKey, tailCsv } from './s3';
 import { ADMIN_HTML } from './admin-ui';
-import { runScheduled } from './scheduled-handler';
+import { runScheduled, fetchOneJob } from './scheduled-handler';
 import { fetchListings } from './sources/listings';
 
 export async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -57,8 +57,8 @@ async function handleApi(req: Request, env: Env, ctx: ExecutionContext, url: URL
   if (method === 'POST' && path === '/api/system/run') return apiSystemRun(env, ctx);
   if (method === 'POST' && path === '/api/system/import') return apiSystemImport(env, url);
 
-  // /api/jobs/:ticker/:interval[/(pause|resume|retry)]
-  const m = path.match(/^\/api\/jobs\/([^/]+)\/([^/]+)(?:\/(pause|resume|retry))?$/);
+  // /api/jobs/:ticker/:interval[/(pause|resume|fetch)]
+  const m = path.match(/^\/api\/jobs\/([^/]+)\/([^/]+)(?:\/(pause|resume|fetch))?$/);
   if (m) {
     const ticker = decodeURIComponent(m[1]);
     const interval = decodeURIComponent(m[2]);
@@ -66,7 +66,7 @@ async function handleApi(req: Request, env: Env, ctx: ExecutionContext, url: URL
     if (method === 'GET' && !action) return apiJobDetail(env, ticker, interval);
     if (method === 'POST' && action === 'pause') return apiSetActive(env, ticker, interval, 0);
     if (method === 'POST' && action === 'resume') return apiSetActive(env, ticker, interval, 1);
-    if (method === 'POST' && action === 'retry') return apiRetry(env, ticker, interval);
+    if (method === 'POST' && action === 'fetch') return apiFetchOne(env, ctx, ticker, interval);
   }
   return jsonErr('Not Found', 404);
 }
@@ -103,6 +103,7 @@ async function apiJobsList(env: Env, url: URL): Promise<Response> {
   const market = url.searchParams.get('market');
   const interval = url.searchParams.get('interval');
   const status = url.searchParams.get('status');
+  const q = (url.searchParams.get('q') ?? '').trim();
   const page = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10));
   const pageSize = Math.min(200, Math.max(1, parseInt(url.searchParams.get('pageSize') || '50', 10)));
 
@@ -113,9 +114,17 @@ async function apiJobsList(env: Env, url: URL): Promise<Response> {
   if (status === 'active') where.push('ti.is_active = 1 AND ti.error_flag = 0');
   if (status === 'paused') where.push('ti.is_active = 0');
   if (status === 'error') where.push('ti.error_flag = 1');
+  if (q) {
+    // 模糊搜索 ticker 或 name；转义 LIKE 通配符避免被搜索词当成模式
+    const esc = q.replace(/[\\%_]/g, (c) => '\\' + c);
+    const pat = `%${esc}%`;
+    where.push("(ti.ticker LIKE ? ESCAPE '\\' OR t.name LIKE ? ESCAPE '\\')");
+    params.push(pat, pat);
+  }
 
   const sql = `SELECT ti.ticker, t.name, t.market, ti.interval, ti.is_active, ti.last_updated_at,
-                      ti.error_flag, ti.error_message, ti.error_count, ti.row_count
+                      ti.error_flag, ti.error_message, ti.error_count, ti.row_count,
+                      ti.data_start_at, ti.data_end_at
                  FROM ticker_intervals ti
                  JOIN tickers t ON t.ticker = ti.ticker
                  ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
@@ -130,7 +139,8 @@ async function apiJobsList(env: Env, url: URL): Promise<Response> {
 async function apiJobDetail(env: Env, ticker: string, interval: string): Promise<Response> {
   const row = await env.market_data_lake.prepare(
     `SELECT ti.ticker, t.name, t.market, ti.interval, ti.is_active, ti.last_updated_at,
-            ti.error_flag, ti.error_message, ti.error_count, ti.row_count
+            ti.error_flag, ti.error_message, ti.error_count, ti.row_count,
+            ti.data_start_at, ti.data_end_at
        FROM ticker_intervals ti
        JOIN tickers t ON t.ticker = ti.ticker
       WHERE ti.ticker = ? AND ti.interval = ?`,
@@ -154,18 +164,30 @@ async function apiSetActive(env: Env, ticker: string, interval: string, value: 0
   return jsonOk({ ok: true });
 }
 
-async function apiRetry(env: Env, ticker: string, interval: string): Promise<Response> {
-  const r = await env.market_data_lake.prepare(
-    `UPDATE ticker_intervals
-        SET error_flag = 0,
-            error_message = NULL,
-            last_updated_at = 0
-      WHERE ticker = ? AND interval = ?`,
-  )
+/** 单只股票立即拉取（fetchOneJob via ctx.waitUntil；30s 内 dashboard 自动刷新可见结果） */
+async function apiFetchOne(
+  env: Env,
+  ctx: ExecutionContext,
+  ticker: string,
+  interval: string,
+): Promise<Response> {
+  const job = await env.market_data_lake
+    .prepare(
+      `SELECT ti.ticker, ti.interval, ti.is_active, ti.last_updated_at,
+              ti.error_flag, ti.error_message, ti.error_count, ti.row_count,
+              ti.data_start_at, ti.data_end_at,
+              t.market, t.name
+         FROM ticker_intervals ti
+         JOIN tickers t ON t.ticker = ti.ticker
+        WHERE ti.ticker = ? AND ti.interval = ?`,
+    )
     .bind(ticker, interval)
-    .run();
-  if ((r.meta?.changes ?? 0) === 0) return jsonErr('Not Found', 404);
-  return jsonOk({ ok: true });
+    .first<TickerJob>();
+  if (!job) return jsonErr('Not Found', 404);
+
+  const s3 = createS3Client(env);
+  ctx.waitUntil(fetchOneJob(env, s3, job));
+  return jsonOk({ ok: true, message: `Fetch ${ticker} ${interval} triggered` });
 }
 
 // ---- 系统级 handlers -------------------------------------------------------

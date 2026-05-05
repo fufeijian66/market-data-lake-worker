@@ -43,7 +43,9 @@ export interface JobRow {
   error_flag: number;
   error_message: string | null;
   error_count: number;
-  row_count: number;        // S3 中已存的 K 线条数
+  row_count: number;             // S3 中已存的 K 线条数
+  data_start_at: string | null;  // ISO 8601，最早一根 K 线
+  data_end_at: string | null;    // ISO 8601，最新一根 K 线
 }
 
 // 调度阶段把 tickers.market / tickers.name join 进来
