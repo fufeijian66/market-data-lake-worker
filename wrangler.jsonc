@@ -1,0 +1,42 @@
+{
+  // Cloudflare Workers 配置（jsonc 支持注释；旧的 wrangler.toml 已弃用）
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "market-data-lake-worker",
+  "main": "src/index.ts",
+  // 较新的 compatibility_date 是 nodejs_compat 在 Workers 上正常工作的前提
+  "compatibility_date": "2025-04-01",
+  // @aws-sdk/client-s3 内部用到 Node API（stream / buffer），必须开 nodejs_compat
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Cron Triggers：每 15 分钟一批；20 条/批，CPU 时间通常 2~10 秒
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
+
+  // D1 绑定：先用 `wrangler d1 create market-data-lake` 创建库，再把返回的 id 填到下面
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "market-data-lake",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID"
+    }
+  ],
+
+  // 打开 observability 方便在仪表盘看日志（可选）
+  "observability": {
+    "enabled": true
+  },
+
+  // 公开变量（敏感项请走 `wrangler secret put`，不要写进 vars）
+  "vars": {
+    // —— S3 凭证（敏感的 access key / secret key 走 secret，不在 vars） ——
+    "S3_ENDPOINT": "https://example.r2.cloudflarestorage.com",
+    "S3_REGION": "auto",
+    "S3_BUCKET": "market-data",
+    // —— Cloudflare Access ——
+    "ACCESS_TEAM_DOMAIN": "yourteam.cloudflareaccess.com",
+    "ACCESS_AUD": "REPLACE_WITH_AUDIENCE_TAG",
+    // 本地 wrangler dev 时建议在 `.dev.vars` 中覆盖为 development，access-auth 中间件会自动跳过
+    "ENVIRONMENT": "production"
+  }
+}
