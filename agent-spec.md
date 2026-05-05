@@ -100,7 +100,7 @@
 
 ### UI 形态
 
-- 单文件 HTML 字符串（`src/admin-ui.html.ts` 导出 `ADMIN_HTML` 常量），无前端构建
+- 单文件 HTML 字符串（`src/admin-ui.ts` 导出 `ADMIN_HTML` 常量），无前端构建
 - 表格展示作业状态，行内三个按钮：暂停 / 恢复 / 重试
 - vanilla JS `fetch` 调用 `/api/*`，响应 JSON 直接渲染
 
@@ -225,7 +225,7 @@ LLM 经常默默选择一种解释然后执行。这个原则强制明确推理�
 | `src/scheduled-handler.ts` | Cron 抓取主流程 |
 | `src/fetch-handler.ts` | HTTP 路由分发（含 access-auth 中间件挂载） |
 | `src/access-auth.ts` | Cloudflare Access JWT 校验中间件（含 JWKS 缓存） |
-| `src/admin-ui.html.ts` | 内嵌单页 HTML 字符串 |
+| `src/admin-ui.ts` | 内嵌单页 HTML 字符串 |
 | `src/s3.ts` | `S3Client` 工厂 + Read-Merge-Overwrite 工具 |
 | `src/sources/yahoo.ts` | Yahoo Finance 适配（US/HK） |
 | `src/sources/sina.ts` | 新浪适配（CN 日线） |

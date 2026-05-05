@@ -42,7 +42,7 @@
     ├── scheduled-handler.ts # Cron 抓取主流程
     ├── fetch-handler.ts     # HTTP 路由分发
     ├── access-auth.ts       # Cloudflare Access JWT 校验
-    ├── admin-ui.html.ts     # 内嵌的单页 HTML 字符串
+    ├── admin-ui.ts          # 内嵌的单页 HTML 字符串
     ├── s3.ts                # S3Client + Read-Merge-Overwrite
     └── sources/
         ├── yahoo.ts

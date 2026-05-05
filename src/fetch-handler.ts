@@ -4,7 +4,7 @@
 import type { Env, JobRow, Market } from './types';
 import { requireAccess } from './access-auth';
 import { createS3Client, objectKey, tailCsv } from './s3';
-import { ADMIN_HTML } from './admin-ui.html';
+import { ADMIN_HTML } from './admin-ui';
 
 export async function handleFetch(req: Request, env: Env): Promise<Response> {
   const url = new URL(req.url);

@@ -42,7 +42,7 @@
     ├── scheduled-handler.ts # Cron 抓取主流程（每次 20 条最旧作业）
     ├── fetch-handler.ts     # HTTP 路由分发（/admin、/api/*）
     ├── access-auth.ts       # Cloudflare Access JWT 校验中间件
-    ├── admin-ui.html.ts     # 内嵌的单页 HTML 字符串
+    ├── admin-ui.ts          # 内嵌的单页 HTML 字符串
     ├── s3.ts                # S3Client 工厂 + Read-Merge-Overwrite
     └── sources/
         ├── yahoo.ts         # 美股/港股
