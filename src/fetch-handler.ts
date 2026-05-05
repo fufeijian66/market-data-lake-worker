@@ -215,8 +215,8 @@ async function apiSystemImport(env: Env, url: URL): Promise<Response> {
   const items = await fetchListings(market);
   if (items.length === 0) return jsonOk({ market, fetched: 0, inserted: 0 });
 
-  // 分块 multi-VALUES INSERT：D1 每条 prepare 的占位符上限有限，80 条/批安全
-  const CHUNK = 80;
+  // 分块 multi-VALUES INSERT：D1 单语句占位符上限 100，40 条/批 × 2 占位符 = 80，留余量
+  const CHUNK = 40;
   let insertedTickers = 0;
   let insertedJobs = 0;
   for (let i = 0; i < items.length; i += CHUNK) {
