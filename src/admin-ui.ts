@@ -86,10 +86,10 @@ export const ADMIN_HTML = `<!doctype html>
 
 <table>
   <thead><tr>
-    <th>Ticker</th><th>Market</th><th>Interval</th><th>Status</th>
-    <th>Last updated</th><th>Errors</th><th>Actions</th>
+    <th>Ticker / Name</th><th>Market</th><th>Interval</th><th>Status</th>
+    <th>Last updated</th><th>Bars</th><th>Errors</th><th>Actions</th>
   </tr></thead>
-  <tbody id="rows"><tr><td colspan="7">Loading...</td></tr></tbody>
+  <tbody id="rows"><tr><td colspan="8">Loading...</td></tr></tbody>
 </table>
 
 <div class="pager">
@@ -126,7 +126,7 @@ export const ADMIN_HTML = `<!doctype html>
 
   function emptyRow(text, color){
     var tr = document.createElement('tr');
-    var td = el('td', {className:'empty', text:text, attrs:{colspan:'7'}});
+    var td = el('td', {className:'empty', text:text, attrs:{colspan:'8'}});
     if(color) td.style.color = color;
     tr.appendChild(td);
     return tr;
@@ -231,6 +231,10 @@ export const ADMIN_HTML = `<!doctype html>
 
       var tdTicker = document.createElement('td');
       tdTicker.appendChild(el('b', {text: r.ticker}));
+      if(r.name){
+        tdTicker.appendChild(document.createElement('br'));
+        tdTicker.appendChild(el('span', {style:{color:'#888',fontSize:'11px'}, text: r.name}));
+      }
       tr.appendChild(tdTicker);
 
       tr.appendChild(el('td', {text: r.market}));
@@ -249,6 +253,7 @@ export const ADMIN_HTML = `<!doctype html>
       tr.appendChild(tdStatus);
 
       tr.appendChild(el('td', {text: fmtTime(r.last_updated_at)}));
+      tr.appendChild(el('td', {text: r.row_count == null ? 0 : r.row_count}));
       tr.appendChild(el('td', {text: r.error_count}));
 
       var tdAct = document.createElement('td');

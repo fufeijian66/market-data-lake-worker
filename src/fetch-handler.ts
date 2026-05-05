@@ -114,8 +114,8 @@ async function apiJobsList(env: Env, url: URL): Promise<Response> {
   if (status === 'paused') where.push('ti.is_active = 0');
   if (status === 'error') where.push('ti.error_flag = 1');
 
-  const sql = `SELECT ti.ticker, t.market, ti.interval, ti.is_active, ti.last_updated_at,
-                      ti.error_flag, ti.error_message, ti.error_count
+  const sql = `SELECT ti.ticker, t.name, t.market, ti.interval, ti.is_active, ti.last_updated_at,
+                      ti.error_flag, ti.error_message, ti.error_count, ti.row_count
                  FROM ticker_intervals ti
                  JOIN tickers t ON t.ticker = ti.ticker
                  ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
@@ -129,14 +129,14 @@ async function apiJobsList(env: Env, url: URL): Promise<Response> {
 
 async function apiJobDetail(env: Env, ticker: string, interval: string): Promise<Response> {
   const row = await env.market_data_lake.prepare(
-    `SELECT ti.ticker, t.market, ti.interval, ti.is_active, ti.last_updated_at,
-            ti.error_flag, ti.error_message, ti.error_count
+    `SELECT ti.ticker, t.name, t.market, ti.interval, ti.is_active, ti.last_updated_at,
+            ti.error_flag, ti.error_message, ti.error_count, ti.row_count
        FROM ticker_intervals ti
        JOIN tickers t ON t.ticker = ti.ticker
       WHERE ti.ticker = ? AND ti.interval = ?`,
   )
     .bind(ticker, interval)
-    .first<JobRow & { market: Market }>();
+    .first<JobRow & { market: Market; name: string | null }>();
   if (!row) return jsonErr('Not Found', 404);
 
   const s3 = createS3Client(env);
@@ -215,28 +215,40 @@ async function apiSystemImport(env: Env, url: URL): Promise<Response> {
   const items = await fetchListings(market);
   if (items.length === 0) return jsonOk({ market, fetched: 0, inserted: 0 });
 
-  // 分块 multi-VALUES INSERT：D1 单语句占位符上限 100，40 条/批 × 2 占位符 = 80，留余量
-  const CHUNK = 40;
+  // 分块 multi-VALUES INSERT：D1 单语句占位符上限 100
+  // tickers 一行 3 个占位符（ticker/market/name），30 行 × 3 = 90 留余量；
+  // ticker_intervals 一行 2 个占位符，40 行 × 2 = 80。
+  const CHUNK_T = 30;
+  const CHUNK_J = 40;
   let insertedTickers = 0;
   let insertedJobs = 0;
-  for (let i = 0; i < items.length; i += CHUNK) {
-    const chunk = items.slice(i, i + CHUNK);
 
-    const ph1 = chunk.map(() => '(?, ?)').join(',');
-    const p1 = chunk.flatMap((t) => [t.ticker, t.market]);
-    const r1 = await env.market_data_lake
-      .prepare(`INSERT OR IGNORE INTO tickers (ticker, market) VALUES ${ph1}`)
-      .bind(...p1)
+  for (let i = 0; i < items.length; i += CHUNK_T) {
+    const chunk = items.slice(i, i + CHUNK_T);
+    const ph = chunk.map(() => '(?, ?, ?)').join(',');
+    const p = chunk.flatMap((t) => [t.ticker, t.market, t.name]);
+    // ON CONFLICT DO UPDATE：让重复导入也能刷新 name（公司改名 / 第一次没拿到名时补回）
+    const r = await env.market_data_lake
+      .prepare(
+        `INSERT INTO tickers (ticker, market, name) VALUES ${ph}
+           ON CONFLICT(ticker) DO UPDATE SET
+             name = excluded.name,
+             market = excluded.market`,
+      )
+      .bind(...p)
       .run();
-    insertedTickers += r1.meta?.changes ?? 0;
+    insertedTickers += r.meta?.changes ?? 0;
+  }
 
-    const ph2 = chunk.map(() => '(?, ?)').join(',');
-    const p2 = chunk.flatMap((t) => [t.ticker, '1d']);
-    const r2 = await env.market_data_lake
-      .prepare(`INSERT OR IGNORE INTO ticker_intervals (ticker, interval) VALUES ${ph2}`)
-      .bind(...p2)
+  for (let i = 0; i < items.length; i += CHUNK_J) {
+    const chunk = items.slice(i, i + CHUNK_J);
+    const ph = chunk.map(() => '(?, ?)').join(',');
+    const p = chunk.flatMap((t) => [t.ticker, '1d']);
+    const r = await env.market_data_lake
+      .prepare(`INSERT OR IGNORE INTO ticker_intervals (ticker, interval) VALUES ${ph}`)
+      .bind(...p)
       .run();
-    insertedJobs += r2.meta?.changes ?? 0;
+    insertedJobs += r.meta?.changes ?? 0;
   }
 
   return jsonOk({

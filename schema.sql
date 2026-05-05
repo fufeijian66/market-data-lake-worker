@@ -7,7 +7,8 @@
 -- 标的主表：每只标的一行
 CREATE TABLE IF NOT EXISTS tickers (
   ticker  TEXT PRIMARY KEY,
-  market  TEXT NOT NULL CHECK (market IN ('US', 'HK', 'CN'))
+  market  TEXT NOT NULL CHECK (market IN ('US', 'HK', 'CN')),
+  name    TEXT                                            -- 标的中/英文名称（来自数据源）
 );
 
 -- 抓取作业表：每个 (ticker, interval) 组合一行；is_active 在作业层 → 可单独暂停某粒度
@@ -18,7 +19,8 @@ CREATE TABLE IF NOT EXISTS ticker_intervals (
   last_updated_at INTEGER NOT NULL DEFAULT 0,            -- Unix epoch ms；0 表示从未抓过（优先调度）
   error_flag      INTEGER NOT NULL DEFAULT 0,            -- 1=最近一次抓取失败
   error_message   TEXT,                                  -- 最近一次失败的错误信息（截断 500 字）
-  error_count     INTEGER NOT NULL DEFAULT 0,            -- 累计失败次数（成功一次后归零或保留？此处仅累加，retry 时清零）
+  error_count     INTEGER NOT NULL DEFAULT 0,            -- 累计失败次数；retry 时清零
+  row_count       INTEGER NOT NULL DEFAULT 0,            -- S3 中已存的 K 线条数（每次合并写入后回写）
   PRIMARY KEY (ticker, interval),
   FOREIGN KEY (ticker) REFERENCES tickers(ticker) ON DELETE CASCADE
 );

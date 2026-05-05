@@ -1,7 +1,7 @@
-// 批量导入各市场的标的清单
+// 批量导入各市场的标的清单（含中英文名称）
 // US：NASDAQ Trader 公开 listing 文件（NASDAQ + NYSE/AMEX 大约 7000 只）
 // CN：东方财富全 A 股清单接口（沪深 + 北交所 大约 5000 只）
-// HK：硬编码 HSI 主要成分股清单（约 80 只；HKEX 全量列表无开放无授权 API，留待后续扩展）
+// HK：硬编码 HSI 主要成分股清单（约 80 只；HKEX 全量列表无开放无授权 API）
 
 import type { Market } from '../types';
 
@@ -11,6 +11,7 @@ const UA =
 export interface NewTicker {
   ticker: string;
   market: Market;
+  name: string;
 }
 
 // ---- US：NASDAQ Trader 文件 -------------------------------------------------
@@ -33,6 +34,7 @@ async function fetchUSListings(): Promise<NewTicker[]> {
 
     const headers = lines[0].split('|').map((h) => h.trim().toLowerCase());
     const symbolCol = headers.findIndex((h) => h === 'symbol' || h === 'act symbol');
+    const nameCol = headers.findIndex((h) => h === 'security name');
     const testCol = headers.findIndex((h) => h === 'test issue');
     const etfCol = headers.findIndex((h) => h === 'etf');
     if (symbolCol < 0) continue;
@@ -42,13 +44,15 @@ async function fetchUSListings(): Promise<NewTicker[]> {
       if (!line || line.startsWith('File Creation Time')) continue;
       const cols = line.split('|');
       const sym = (cols[symbolCol] ?? '').trim();
-      // 跳过优先股 / 单元 / warrant 等带特殊字符的 ticker，Yahoo 通常抓不到
       if (!sym || /[\$\.\^=]/.test(sym)) continue;
       if (testCol >= 0 && (cols[testCol] ?? '').trim() === 'Y') continue;
       if (etfCol >= 0 && (cols[etfCol] ?? '').trim() === 'Y') continue;
       if (seen.has(sym)) continue;
       seen.add(sym);
-      out.push({ ticker: sym, market: 'US' });
+      // Security Name 形如 "Apple Inc. - Common Stock"，按 " - " 切掉证券类型后缀
+      const rawName = nameCol >= 0 ? (cols[nameCol] ?? '').trim() : '';
+      const name = rawName.replace(/\s+-\s+(Common|Preferred|Ordinary|Class|Depositary|ADR)[\s\S]*$/i, '');
+      out.push({ ticker: sym, market: 'US', name });
     }
   }
   return out;
@@ -70,7 +74,6 @@ async function fetchCNListings(): Promise<NewTicker[]> {
   url.searchParams.set('po', '1');
   url.searchParams.set('np', '1');
   url.searchParams.set('fid', 'f3');
-  // 沪 A + 深 A + 创业板 + 科创板 + 北交所
   url.searchParams.set('fs', 'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048,m:0+t:81+s:1');
   url.searchParams.set('fields', 'f12,f14');
 
@@ -84,34 +87,51 @@ async function fetchCNListings(): Promise<NewTicker[]> {
   for (const it of items) {
     const code = String(it.f12 ?? '');
     if (!/^\d{6}$/.test(code)) continue;
-    // 6/9 沪市，0/3 深市，4/8 北交所
-    const prefix =
-      code.startsWith('6') || code.startsWith('9') ? 'sh' : 'sz';
+    const prefix = code.startsWith('6') || code.startsWith('9') ? 'sh' : 'sz';
     const ticker = `${prefix}${code}`;
     if (seen.has(ticker)) continue;
     seen.add(ticker);
-    out.push({ ticker, market: 'CN' });
+    out.push({ ticker, market: 'CN', name: String(it.f14 ?? '') });
   }
   return out;
 }
 
-// ---- HK：HSI 主要成分股（硬编码）-------------------------------------------
+// ---- HK：HSI 主要成分股（硬编码：code → name）-----------------------------
 
-const HK_HSI_COMPONENTS = [
-  '0001', '0002', '0003', '0005', '0006', '0011', '0012', '0016', '0017', '0027',
-  '0066', '0101', '0175', '0241', '0267', '0288', '0291', '0316', '0322', '0386',
-  '0388', '0669', '0688', '0700', '0762', '0823', '0857', '0868', '0883', '0939',
-  '0941', '0960', '0968', '0981', '0992', '1038', '1044', '1093', '1099', '1109',
-  '1113', '1177', '1209', '1211', '1299', '1378', '1398', '1810', '1876', '1928',
-  '1929', '1997', '2007', '2015', '2018', '2020', '2269', '2313', '2318', '2319',
-  '2331', '2382', '2388', '2628', '2688', '2899', '3690', '3692', '3968', '3988',
-  '6098', '6862', '9618', '9633', '9888', '9961', '9988', '9999',
-];
+const HK_HSI_NAMES: Record<string, string> = {
+  '0001': '长和',                  '0002': '中电控股',              '0003': '香港中华煤气',
+  '0005': '汇丰控股',              '0006': '电能实业',              '0011': '恒生银行',
+  '0012': '恒基地产',              '0016': '新鸿基地产',            '0017': '新世界发展',
+  '0027': '银河娱乐',              '0066': '港铁公司',              '0101': '恒隆地产',
+  '0175': '吉利汽车',              '0241': '阿里健康',              '0267': '中信股份',
+  '0288': '万洲国际',              '0291': '华润啤酒',              '0316': '东方海外国际',
+  '0322': '康师傅控股',            '0386': '中国石油化工股份',      '0388': '香港交易所',
+  '0669': '创科实业',              '0688': '中国海外发展',          '0700': '腾讯控股',
+  '0762': '中国联通',              '0823': '领展房产基金',          '0857': '中国石油股份',
+  '0868': '信义玻璃',              '0883': '中国海洋石油',          '0939': '建设银行',
+  '0941': '中国移动',              '0960': '龙湖集团',              '0968': '信义光能',
+  '0981': '中芯国际',              '0992': '联想集团',              '1038': '长江基建集团',
+  '1044': '恒安国际',              '1093': '石药集团',              '1099': '国药控股',
+  '1109': '华润置地',              '1113': '长实集团',              '1177': '中国生物制药',
+  '1209': '华润万象生活',          '1211': '比亚迪股份',            '1299': '友邦保险',
+  '1378': '中国宏桥',              '1398': '工商银行',              '1810': '小米集团-W',
+  '1876': '百威亚太',              '1928': '金沙中国有限公司',      '1929': '周大福',
+  '1997': '九龙仓置业',            '2007': '碧桂园',                '2015': '理想汽车-W',
+  '2018': '瑞声科技',              '2020': '安踏体育',              '2269': '药明生物',
+  '2313': '申洲国际',              '2318': '中国平安',              '2319': '蒙牛乳业',
+  '2331': '李宁',                  '2382': '舜宇光学科技',          '2388': '中银香港',
+  '2628': '中国人寿',              '2688': '新奥能源',              '2899': '紫金矿业',
+  '3690': '美团-W',                '3692': '翰森制药',              '3968': '招商银行',
+  '3988': '中国银行',              '6098': '碧桂园服务',            '6862': '海底捞',
+  '9618': '京东集团-SW',           '9633': '农夫山泉',              '9888': '百度集团-SW',
+  '9961': '携程集团-S',            '9988': '阿里巴巴-SW',           '9999': '网易-S',
+};
 
 function fetchHKListings(): NewTicker[] {
-  return HK_HSI_COMPONENTS.map((code) => ({
+  return Object.keys(HK_HSI_NAMES).map((code) => ({
     ticker: `${code}.HK`,
     market: 'HK' as const,
+    name: HK_HSI_NAMES[code],
   }));
 }
 

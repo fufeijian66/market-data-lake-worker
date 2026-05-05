@@ -43,9 +43,11 @@ export interface JobRow {
   error_flag: number;
   error_message: string | null;
   error_count: number;
+  row_count: number;        // S3 中已存的 K 线条数
 }
 
-// 调度阶段把 tickers.market join 进来
+// 调度阶段把 tickers.market / tickers.name join 进来
 export interface TickerJob extends JobRow {
   market: Market;
+  name: string | null;
 }

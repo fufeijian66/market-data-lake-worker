@@ -29,8 +29,8 @@ export async function runScheduled(env: Env): Promise<void> {
       try {
         const fresh = await fetchOHLCV(job.market, job.ticker, job.interval);
         const key = objectKey(job.market, job.interval, job.ticker);
-        await mergeAndUpload(s3, key, fresh);
-        await markSuccess(env, job);
+        const result = await mergeAndUpload(s3, key, fresh);
+        await markSuccess(env, job, result.total);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         await markFailure(env, job, msg);
@@ -42,7 +42,8 @@ export async function runScheduled(env: Env): Promise<void> {
 async function pickOldestJobs(env: Env, n: number): Promise<TickerJob[]> {
   const { results } = await env.market_data_lake.prepare(
     `SELECT ti.ticker, ti.interval, ti.is_active, ti.last_updated_at,
-            ti.error_flag, ti.error_message, ti.error_count, t.market
+            ti.error_flag, ti.error_message, ti.error_count, ti.row_count,
+            t.market, t.name
        FROM ticker_intervals ti
        JOIN tickers t ON t.ticker = ti.ticker
       WHERE ti.is_active = 1
@@ -54,15 +55,16 @@ async function pickOldestJobs(env: Env, n: number): Promise<TickerJob[]> {
   return results ?? [];
 }
 
-async function markSuccess(env: Env, job: TickerJob): Promise<void> {
+async function markSuccess(env: Env, job: TickerJob, rowCount: number): Promise<void> {
   await env.market_data_lake.prepare(
     `UPDATE ticker_intervals
         SET last_updated_at = ?,
             error_flag = 0,
-            error_message = NULL
+            error_message = NULL,
+            row_count = ?
       WHERE ticker = ? AND interval = ?`,
   )
-    .bind(Date.now(), job.ticker, job.interval)
+    .bind(Date.now(), rowCount, job.ticker, job.interval)
     .run();
 }
 
