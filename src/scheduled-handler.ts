@@ -8,15 +8,22 @@ import { createS3Client, mergeAndUpload, objectKey, type S3Ctx } from './s3';
 import { fetchOHLCV } from './sources';
 
 // Workers Free tier 限制：50 subrequests/invocation。每个 job 需要 4 个 subrequest
-// (fetchOHLCV + S3 GET + S3 PUT + D1 UPDATE)，所以 BATCH_SIZE * 4 + 2(init queries) <= 50。
-// 10 × 4 + 2 = 42，留 8 的 buffer。Workers Paid（$5/mo, 1000 subreq）可调到 50+。
-const BATCH_SIZE = 10;
+// (fetchOHLCV + S3 GET + S3 PUT + D1 UPDATE)，所以 BATCH_SIZE * 4 + 3(heartbeat+enabled+pick) <= 50。
+// 8 × 4 + 3 = 35，留 15 的 buffer。Workers Paid 可调到 50+。
+const BATCH_SIZE = 8;
 
 export async function runScheduled(env: Env): Promise<{
   picked: number;
   succeeded: number;
   failed: number;
 }> {
+  // 心跳：无论 enabled 与否、是否取到 jobs，只要 scheduled handler 被触发就写一行。
+  // 如果心跳不更新 = Cloudflare cron 触发层根本没接到事件。
+  await env.market_data_lake
+    .prepare(`INSERT OR REPLACE INTO system_config (key, value) VALUES ('cron_heartbeat', ?)`)
+    .bind(String(Date.now()))
+    .run();
+
   const flag = await env.market_data_lake
     .prepare(`SELECT value FROM system_config WHERE key = 'cron_enabled'`)
     .first<{ value: string }>();

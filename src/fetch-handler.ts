@@ -55,6 +55,7 @@ async function handleApi(req: Request, env: Env, ctx: ExecutionContext, url: URL
   // —— 系统级控制 ——
   if (method === 'GET' && path === '/api/system') return apiSystemGet(env);
   if (method === 'POST' && path === '/api/system/cron/toggle') return apiSystemCronToggle(env);
+  if (method === 'GET' && path === '/api/system/diag') return apiSystemDiag(env);
   if (method === 'POST' && path === '/api/system/run') return apiSystemRun(env, ctx);
   if (method === 'POST' && path === '/api/system/run-sync') return apiSystemRunSync(env);
   if (method === 'POST' && path === '/api/system/import') return apiSystemImport(env, url);
@@ -228,6 +229,66 @@ async function apiSystemRun(env: Env, ctx: ExecutionContext): Promise<Response> 
 async function apiSystemRunSync(env: Env): Promise<Response> {
   const result = await runScheduled(env);
   return jsonOk(result);
+}
+
+/** 一次性快照诊断：D1 实际状态 + 队列下一波要抓的 + 错误样本 */
+async function apiSystemDiag(env: Env): Promise<Response> {
+  const now = Date.now();
+
+  const counts = await env.market_data_lake
+    .prepare(
+      `SELECT
+         COUNT(*)                                                AS total,
+         SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END)          AS active,
+         SUM(CASE WHEN is_active = 0 THEN 1 ELSE 0 END)          AS paused,
+         SUM(CASE WHEN error_flag = 1 THEN 1 ELSE 0 END)         AS errors,
+         SUM(CASE WHEN last_updated_at = 0 THEN 1 ELSE 0 END)    AS never_updated,
+         SUM(CASE WHEN last_updated_at > 0 THEN 1 ELSE 0 END)    AS ever_updated,
+         MAX(last_updated_at)                                    AS last_run_at,
+         SUM(error_count)                                        AS total_error_count
+       FROM ticker_intervals`,
+    )
+    .first<{
+      total: number; active: number; paused: number; errors: number;
+      never_updated: number; ever_updated: number;
+      last_run_at: number | null; total_error_count: number;
+    }>();
+
+  const stale = await env.market_data_lake
+    .prepare(
+      `SELECT ticker, interval, last_updated_at, error_flag, error_count, error_message
+         FROM ticker_intervals
+        WHERE is_active = 1
+        ORDER BY last_updated_at ASC
+        LIMIT 5`,
+    )
+    .all();
+
+  const errs = await env.market_data_lake
+    .prepare(
+      `SELECT ticker, interval, error_count, error_message, last_updated_at
+         FROM ticker_intervals
+        WHERE error_flag = 1
+        ORDER BY error_count DESC
+        LIMIT 5`,
+    )
+    .all();
+
+  const sys = await env.market_data_lake.prepare(`SELECT key, value FROM system_config`).all();
+
+  return jsonOk({
+    now,
+    iso_now: new Date(now).toISOString(),
+    counts,
+    minutes_since_last_run:
+      counts?.last_run_at && counts.last_run_at > 0
+        ? Math.round((now - counts.last_run_at) / 60000)
+        : null,
+    last_run_iso: counts?.last_run_at ? new Date(counts.last_run_at).toISOString() : null,
+    next_oldest: stale.results,
+    error_samples: errs.results,
+    system_config: sys.results,
+  });
 }
 
 /**

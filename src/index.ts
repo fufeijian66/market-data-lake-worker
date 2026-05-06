@@ -9,9 +9,11 @@ const worker: ExportedHandler<Env> = {
     return handleFetch(request, env, ctx);
   },
 
-  scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): void {
-    // ctx.waitUntil 让 Cron 触发后立即返回，抓取在后台异步完成
-    ctx.waitUntil(runScheduled(env));
+  // 直接 await 而不是 ctx.waitUntil，让 Workers runtime 严格等到 runScheduled 完成。
+  // ctx.waitUntil 在某些 worker isolate 重用场景下偶发不等到 promise resolve 就回收 isolate，
+  // 表现就是 cron 触发了但什么也没发生。await 显式同步等是更稳的写法。
+  async scheduled(_controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+    await runScheduled(env);
   },
 };
 
