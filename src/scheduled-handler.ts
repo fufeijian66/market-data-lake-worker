@@ -7,10 +7,12 @@ import type { Env, TickerJob } from './types';
 import { createS3Client, mergeAndUpload, objectKey, type S3Ctx } from './s3';
 import { fetchOHLCV } from './sources';
 
-// Workers Free tier 限制：50 subrequests/invocation。每个 job 需要 4 个 subrequest
-// (fetchOHLCV + S3 GET + S3 PUT + D1 UPDATE)，所以 BATCH_SIZE * 4 + 3(heartbeat+enabled+pick) <= 50。
-// 8 × 4 + 3 = 35，留 15 的 buffer。Workers Paid 可调到 50+。
-const BATCH_SIZE = 8;
+// Workers 子请求上限：Free 50 / Paid 1000 per invocation。
+// 每个 job 需要 4 个 subrequest（fetchOHLCV + S3 GET + S3 PUT + D1 UPDATE）。
+// Paid 用户：50 × 4 + 3 = 203，远低于 1000 上限；3658 条 / 50 / 12 cron-per-hour ≈ 6 小时全量扫完。
+// 想再快可以同时把 wrangler.jsonc 的 cron 从 */5 改成 */2 或 */1。
+// 如果回退 Free，请把这里改回 8（8×4+3=35，安全 fit 50）。
+const BATCH_SIZE = 50;
 
 export async function runScheduled(env: Env): Promise<{
   picked: number;
