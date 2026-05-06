@@ -204,7 +204,7 @@ async function apiSystemGet(env: Env): Promise<Response> {
   for (const r of results ?? []) map[r.key] = r.value;
   return jsonOk({
     cron_enabled: map.cron_enabled === '1',
-    cron_schedule: map.cron_schedule ?? '*/5 * * * *',
+    cron_schedule: map.cron_schedule ?? '* * * * *',
   });
 }
 

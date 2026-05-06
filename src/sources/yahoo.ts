@@ -12,9 +12,12 @@ function pickUA(): string {
   return UAS[Math.floor(Math.random() * UAS.length)];
 }
 
-// Yahoo 的历史窗口 vs 粒度限制（agent-spec.md「已知约束」节）
-// 大粒度（1d/1wk/1mo）改 'max' 拉全部历史（可达 30+ 年），小粒度仍受 Yahoo 服务端约束
-const RANGE_FOR_INTERVAL: Record<Interval, string> = {
+// 上游 fetch 超时（毫秒）。没有这个 Yahoo 偶发卡住会拖死整批 Promise.allSettled
+const FETCH_TIMEOUT_MS = 8000;
+
+// 首抓时拉全历史；增量更新时只拉一小段（覆盖最近的窗口 + 重叠去重靠 Datetime）
+// Yahoo 只接受枚举 range：1d, 5d, 7d, 60d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max, 730d
+const RANGE_FIRST_TIME: Record<Interval, string> = {
   '1m':  '7d',
   '5m':  '60d',
   '15m': '60d',
@@ -24,6 +27,41 @@ const RANGE_FOR_INTERVAL: Record<Interval, string> = {
   '1wk': 'max',
   '1mo': 'max',
 };
+const RANGE_INCREMENTAL: Record<Interval, string> = {
+  '1m':  '1d',
+  '5m':  '5d',
+  '15m': '5d',
+  '30m': '5d',
+  '1h':  '7d',
+  '1d':  '1mo',
+  '1wk': '3mo',
+  '1mo': '1y',
+};
+
+/**
+ * 增量判定：data_end_at 在最近 N 天以内 → 用小窗口；否则用全历史。
+ * N 故意取得比 RANGE_INCREMENTAL 略小，避免抓到的窗口与上次"擦肩而过"漏掉中间数据。
+ */
+const INCREMENTAL_THRESHOLD_DAYS: Record<Interval, number> = {
+  '1m':  1,
+  '5m':  3,
+  '15m': 3,
+  '30m': 3,
+  '1h':  5,
+  '1d':  20,
+  '1wk': 60,
+  '1mo': 300,
+};
+
+function pickRange(interval: Interval, dataEndAt: string | null): string {
+  if (!dataEndAt) return RANGE_FIRST_TIME[interval];
+  const end = Date.parse(dataEndAt);
+  if (!Number.isFinite(end)) return RANGE_FIRST_TIME[interval];
+  const daysSince = (Date.now() - end) / 86_400_000;
+  return daysSince <= INCREMENTAL_THRESHOLD_DAYS[interval]
+    ? RANGE_INCREMENTAL[interval]
+    : RANGE_FIRST_TIME[interval];
+}
 
 interface YahooChartResp {
   chart?: {
@@ -43,16 +81,21 @@ interface YahooChartResp {
   };
 }
 
-export async function fetchYahoo(symbol: string, interval: Interval): Promise<OHLCV[]> {
+export async function fetchYahoo(
+  symbol: string,
+  interval: Interval,
+  dataEndAt: string | null = null,
+): Promise<OHLCV[]> {
   const url = new URL(
     `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}`,
   );
   url.searchParams.set('interval', interval);
-  url.searchParams.set('range', RANGE_FOR_INTERVAL[interval]);
+  url.searchParams.set('range', pickRange(interval, dataEndAt));
   url.searchParams.set('includePrePost', 'false');
 
   const resp = await fetch(url.toString(), {
     headers: { 'User-Agent': pickUA(), Accept: 'application/json' },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
   if (!resp.ok) throw new Error(`Yahoo ${symbol} ${interval} HTTP ${resp.status}`);
 

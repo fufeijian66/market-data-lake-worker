@@ -24,6 +24,44 @@ const KLT: Record<Interval, number> = {
   '1mo': 103,
 };
 
+// 上游 fetch 超时（毫秒），避免 push2his.eastmoney.com 偶发卡死拖死整批
+const FETCH_TIMEOUT_MS = 8000;
+
+// lmt 行数：首抓时拉满 10000 ≈ 40 年日线；增量只取尾部最近 N 行去重合并
+// 增量值故意取得比"理论上最大缺口"高几倍，给停牌/节假日留余量
+const LMT_FIRST_TIME = 10000;
+const LMT_INCREMENTAL: Record<Interval, number> = {
+  '1m':  240,   // 半天分钟线
+  '5m':  240,   // 5 天 5 分钟线
+  '15m': 200,   // 1 周
+  '30m': 200,   // 2 周
+  '1h':  100,   // 半个月小时线
+  '1d':  60,    // 2 月日线
+  '1wk': 30,    // 半年周线
+  '1mo': 24,    // 2 年月线
+};
+
+const INCREMENTAL_THRESHOLD_DAYS: Record<Interval, number> = {
+  '1m':  1,
+  '5m':  3,
+  '15m': 5,
+  '30m': 7,
+  '1h':  10,
+  '1d':  30,
+  '1wk': 90,
+  '1mo': 365,
+};
+
+function pickLmt(interval: Interval, dataEndAt: string | null): number {
+  if (!dataEndAt) return LMT_FIRST_TIME;
+  const end = Date.parse(dataEndAt);
+  if (!Number.isFinite(end)) return LMT_FIRST_TIME;
+  const daysSince = (Date.now() - end) / 86_400_000;
+  return daysSince <= INCREMENTAL_THRESHOLD_DAYS[interval]
+    ? LMT_INCREMENTAL[interval]
+    : LMT_FIRST_TIME;
+}
+
 /**
  * 东方财富 secid 编码：
  *   - 沪市 (sh*)、6 开头  → 1.{6 位代码}
@@ -49,7 +87,11 @@ interface EmResp {
   data?: { klines?: string[] };
 }
 
-export async function fetchEastmoney(symbol: string, interval: Interval): Promise<OHLCV[]> {
+export async function fetchEastmoney(
+  symbol: string,
+  interval: Interval,
+  dataEndAt: string | null = null,
+): Promise<OHLCV[]> {
   const url = new URL('https://push2his.eastmoney.com/api/qt/stock/kline/get');
   url.searchParams.set('secid', toSecid(symbol));
   url.searchParams.set('fields1', 'f1,f2,f3,f4,f5,f6');
@@ -57,10 +99,12 @@ export async function fetchEastmoney(symbol: string, interval: Interval): Promis
   url.searchParams.set('klt', String(KLT[interval]));
   url.searchParams.set('fqt', '1'); // 前复权
   url.searchParams.set('end', '20500101');
-  // 东方财富对 lmt 限制宽松；10000 对日线 ≈ 40 年，足够拉到上市首日
-  url.searchParams.set('lmt', '10000');
+  url.searchParams.set('lmt', String(pickLmt(interval, dataEndAt)));
 
-  const resp = await fetch(url.toString(), { headers: { 'User-Agent': pickUA() } });
+  const resp = await fetch(url.toString(), {
+    headers: { 'User-Agent': pickUA() },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
   if (!resp.ok) throw new Error(`Eastmoney ${symbol} ${interval} HTTP ${resp.status}`);
 
   const json = (await resp.json()) as EmResp;
