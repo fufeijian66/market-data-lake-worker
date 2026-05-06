@@ -12,18 +12,21 @@ import { fetchOHLCV } from './sources';
 //
 // Paid tier 单次 invocation 跑 ROUNDS × BATCH_SIZE 个作业：
 //   subrequest = ROUNDS × (BATCH_SIZE × 4 + 1 pickOldest) + 2 (heartbeat + cron_enabled)
-//   = 4 × (50×4 + 1) + 2 = 806，仍 fit 1000
+//   = 2 × (50×4 + 1) + 2 = 404，远低于 1000 上限
 //
-// cron `* * * * *`（1 分钟一次） + 每分钟 4 轮 × 50 = 200 个/min，
-// 3658 条全量约 18 分钟扫完一遍（旧版 *5min × 50 = 6h）。
+// cron `*/2 * * * *` + 每次 2 轮 × 50 = 100 个/2min = 50 jobs/min，
+// 3658 条全量约 1.2 小时扫完一遍（旧版 */5min × 50 = 6h）。
+// 之前试过 */1min × 4 轮 × 50 = 200/min，把东方财富顶出 520，故收敛到这个量级。
 //
 // 如果回退 Free tier：BATCH_SIZE = 8，ROUNDS = 1，total = 8×4+3 = 35，fit 50。
 const BATCH_SIZE = 50;
-const ROUNDS = 4;
+const ROUNDS = 2;
 
-// 失败熔断：连续失败到这个次数自动 is_active = 0，避免坏标的反复挤占 batch 名额
-// 管理后台手动 resume 后 error_count 不会自动清零，但下一次成功会清；想强制清零
-// 可手动 fetch 一次或在 D1 直接 UPDATE。
+// 东方财富对 push2his 公益接口稳定性差，并发一高直接 502/520。
+// CN 标的在每批内串行执行，相邻请求间隔 CN_GAP_MS。Yahoo (US/HK) 仍并发。
+const CN_GAP_MS = 150;
+
+// 失败熔断：连续"永久失败"达此阈值自动 is_active = 0；可重试错误（5xx/429/超时）不计数。
 const ERROR_DISABLE_THRESHOLD = 10;
 
 export async function runScheduled(env: Env): Promise<{
@@ -59,15 +62,40 @@ export async function runScheduled(env: Env): Promise<{
     if (jobs.length === 0) break;
     picked += jobs.length;
 
-    const results = await Promise.allSettled(jobs.map((job) => fetchOneJob(env, s3, job)));
-    for (const r of results) {
+    // 按 market 分流：US/HK 走 Yahoo 全并发；CN 走东方财富，串行 + 间隔，避免被 5xx
+    const cn: TickerJob[] = [];
+    const others: TickerJob[] = [];
+    for (const j of jobs) (j.market === 'CN' ? cn : others).push(j);
+
+    const [othersR, cnR] = await Promise.all([
+      Promise.allSettled(others.map((job) => fetchOneJob(env, s3, job))),
+      runSerialWithGap(env, s3, cn, CN_GAP_MS),
+    ]);
+
+    for (const r of othersR) {
       if (r.status === 'fulfilled' && r.value === true) succeeded++;
       else failed++;
     }
+    for (const ok of cnR) (ok ? succeeded++ : failed++);
   }
 
   console.log(`[cron] done: picked=${picked} ok=${succeeded} failed=${failed}`);
   return { picked, succeeded, failed };
+}
+
+/** 串行执行作业，相邻请求间留 gapMs 间隔；fetchOneJob 内部已自吞异常，不会向上抛 */
+async function runSerialWithGap(
+  env: Env,
+  s3: S3Ctx,
+  jobs: TickerJob[],
+  gapMs: number,
+): Promise<boolean[]> {
+  const out: boolean[] = [];
+  for (let i = 0; i < jobs.length; i++) {
+    if (i > 0) await new Promise((r) => setTimeout(r, gapMs));
+    out.push(await fetchOneJob(env, s3, jobs[i]));
+  }
+  return out;
 }
 
 /**
@@ -139,14 +167,38 @@ async function markSuccess(env: Env, job: TickerJob, r: MergeResult): Promise<vo
 }
 
 /**
- * 失败时：
- *  1. error_count + 1
- *  2. last_updated_at = now() 让该行下沉到队列末尾，避免坏标的反复挤占名额
- *  3. error_count 达到 ERROR_DISABLE_THRESHOLD 后自动 is_active = 0，需要管理员手动 resume
- *     管理员手动 fetch 成功会清 error_flag 但不清 error_count；如果想恢复"重试预算"
- *     可以在后台对该行直接 UPDATE error_count = 0。
+ * 区分可重试错误（上游临时不可用）vs 永久错误（标的下架 / 代码改名 / 我们 bug）：
+ *   - 5xx / 429 / 超时 / DNS 抖动 → 可重试，error_message 记录但 error_count 不增；
+ *     last_updated_at 仍设 now() 让该行下沉，给其它健康作业让路
+ *   - 其它（4xx 客户端错、解析错、空结果...） → 永久，error_count + 1，
+ *     达 ERROR_DISABLE_THRESHOLD 自动 is_active = 0
  */
+function isRetryable(msg: string): boolean {
+  // AbortSignal.timeout 抛出来的消息形如 "The operation was aborted" / "TimeoutError"
+  if (/abort|timeout/i.test(msg)) return true;
+  // 我们在 sources/* 抛错时把 HTTP 状态码写进了 message
+  const m = msg.match(/HTTP (\d{3})/);
+  if (!m) return false;
+  const code = Number(m[1]);
+  return code === 408 || code === 429 || (code >= 500 && code <= 599);
+}
+
 async function markFailure(env: Env, job: TickerJob, msg: string): Promise<void> {
+  const truncated = msg.slice(0, 500);
+  const now = Date.now();
+  if (isRetryable(msg)) {
+    await env.market_data_lake
+      .prepare(
+        `UPDATE ticker_intervals
+            SET error_flag = 1,
+                error_message = ?,
+                last_updated_at = ?
+          WHERE ticker = ? AND interval = ?`,
+      )
+      .bind(truncated, now, job.ticker, job.interval)
+      .run();
+    return;
+  }
   await env.market_data_lake
     .prepare(
       `UPDATE ticker_intervals
@@ -157,6 +209,6 @@ async function markFailure(env: Env, job: TickerJob, msg: string): Promise<void>
               last_updated_at = ?
         WHERE ticker = ? AND interval = ?`,
     )
-    .bind(msg.slice(0, 500), ERROR_DISABLE_THRESHOLD, Date.now(), job.ticker, job.interval)
+    .bind(truncated, ERROR_DISABLE_THRESHOLD, now, job.ticker, job.interval)
     .run();
 }

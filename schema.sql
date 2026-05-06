@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS system_config (
 -- 默认值：cron 默认开启，schedule 仅用于 UI 展示（真值在 wrangler.jsonc）
 INSERT OR IGNORE INTO system_config (key, value) VALUES
   ('cron_enabled',  '1'),
-  ('cron_schedule', '* * * * *');
+  ('cron_schedule', '*/2 * * * *');
 
 -- =============================================================================
 -- 示例种子数据（按需取消注释执行）

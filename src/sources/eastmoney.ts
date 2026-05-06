@@ -27,6 +27,11 @@ const KLT: Record<Interval, number> = {
 // 上游 fetch 超时（毫秒），避免 push2his.eastmoney.com 偶发卡死拖死整批
 const FETCH_TIMEOUT_MS = 8000;
 
+// 5xx / 超时单次重试。push2his.eastmoney.com 经常随机 520，多 1 次 retry 能吸收 ~80% 抖动。
+// 不做更多次重试：会拖长 CN 串行批次的总耗时（30s wallclock 上限）
+const MAX_ATTEMPTS = 2;
+const RETRY_BACKOFF_MS = 400;
+
 // lmt 行数：首抓时拉满 10000 ≈ 40 年日线；增量只取尾部最近 N 行去重合并
 // 增量值故意取得比"理论上最大缺口"高几倍，给停牌/节假日留余量
 const LMT_FIRST_TIME = 10000;
@@ -101,15 +106,46 @@ export async function fetchEastmoney(
   url.searchParams.set('end', '20500101');
   url.searchParams.set('lmt', String(pickLmt(interval, dataEndAt)));
 
-  const resp = await fetch(url.toString(), {
-    headers: { 'User-Agent': pickUA() },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  if (!resp.ok) throw new Error(`Eastmoney ${symbol} ${interval} HTTP ${resp.status}`);
+  // 真浏览器风格的 header：东方财富对裸 fetch 偶发 520，加上 Referer/Accept 后明显改善
+  const headers = {
+    'User-Agent': pickUA(),
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    'Referer': 'https://quote.eastmoney.com/',
+  };
 
-  const json = (await resp.json()) as EmResp;
-  const klines = json.data?.klines ?? [];
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const resp = await fetch(url.toString(), {
+        headers,
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+      if (!resp.ok) {
+        // 5xx / 408 / 429 → 可重试；4xx（除上述）直接抛出，不浪费下一次 attempt
+        const transient = resp.status === 408 || resp.status === 429 || resp.status >= 500;
+        if (transient && attempt < MAX_ATTEMPTS) {
+          await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS));
+          continue;
+        }
+        throw new Error(`Eastmoney ${symbol} ${interval} HTTP ${resp.status}`);
+      }
+      const json = (await resp.json()) as EmResp;
+      return parseKlines(json.data?.klines ?? []);
+    } catch (err) {
+      lastErr = err;
+      // AbortError / 网络错 → 重试；HTTP 4xx 已在上面 throw 出来不会进这里
+      if (attempt < MAX_ATTEMPTS) {
+        await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr ?? new Error(`Eastmoney ${symbol} ${interval} unreachable`);
+}
 
+function parseKlines(klines: string[]): OHLCV[] {
   return klines
     .map((line) => line.split(','))
     .filter((c) => c.length >= 6)
