@@ -1,4 +1,4 @@
-// 东方财富适配（A 股小时/分钟，及周/月线）
+// 东方财富适配（A 股 / 港股小时分钟线、日周月线）
 // 端点：push2his.eastmoney.com/api/qt/stock/kline/get
 // klt: 1=1m  5=5m  15=15m  30=30m  60=1h  101=1d  102=1wk  103=1mo
 // 注意：返回 klines 字段顺序为 [date, open, close, high, low, volume, ...]（架构红线 #5 适配点）
@@ -73,13 +73,19 @@ function pickLmt(interval: Interval, dataEndAt: string | null): number {
  *   - 深市 (sz*)、其它  → 0.{6 位代码}
  *   - 北交所 (bj*)       → 0.{6 位代码}
  */
-function toSecid(symbol: string): string {
+function toCnSecid(symbol: string): string {
   const s = symbol.toLowerCase();
   if (s.startsWith('sh')) return `1.${s.slice(2)}`;
   if (s.startsWith('sz')) return `0.${s.slice(2)}`;
   if (s.startsWith('bj')) return `0.${s.slice(2)}`;
   // 兼容裸 6 位：6 开头沪市
   return `${s.startsWith('6') ? 1 : 0}.${s}`;
+}
+
+function toHkSecid(symbol: string): string {
+  const m = symbol.toUpperCase().match(/^(\d{1,5})(?:\.HK)?$/);
+  if (!m) throw new Error(`Eastmoney HK unsupported symbol: ${symbol}`);
+  return `116.${m[1].padStart(5, '0')}`;
 }
 
 /** 东方财富时间戳：日线 'YYYY-MM-DD'；分钟线 'YYYY-MM-DD HH:mm' */
@@ -97,8 +103,25 @@ export async function fetchEastmoney(
   interval: Interval,
   dataEndAt: string | null = null,
 ): Promise<OHLCV[]> {
+  return fetchEastmoneyBySecid(symbol, toCnSecid(symbol), interval, dataEndAt);
+}
+
+export async function fetchEastmoneyHK(
+  symbol: string,
+  interval: Interval,
+  dataEndAt: string | null = null,
+): Promise<OHLCV[]> {
+  return fetchEastmoneyBySecid(symbol, toHkSecid(symbol), interval, dataEndAt);
+}
+
+async function fetchEastmoneyBySecid(
+  symbol: string,
+  secid: string,
+  interval: Interval,
+  dataEndAt: string | null,
+): Promise<OHLCV[]> {
   const url = new URL('https://push2his.eastmoney.com/api/qt/stock/kline/get');
-  url.searchParams.set('secid', toSecid(symbol));
+  url.searchParams.set('secid', secid);
   url.searchParams.set('fields1', 'f1,f2,f3,f4,f5,f6');
   url.searchParams.set('fields2', 'f51,f52,f53,f54,f55,f56,f57,f58');
   url.searchParams.set('klt', String(KLT[interval]));

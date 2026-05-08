@@ -63,35 +63,55 @@ async function fetchUSListings(): Promise<NewTicker[]> {
 interface EmCnResp {
   data?: {
     total?: number;
-    diff?: Array<{ f12?: string; f14?: string }>;
+    diff?: Array<{ f12?: string; f13?: number; f14?: string }>;
   };
 }
 
-async function fetchCNListings(): Promise<NewTicker[]> {
+const CN_LISTING_PAGE_SIZE = 100;
+
+function buildCNListingUrl(page: number): URL {
   const url = new URL('https://82.push2.eastmoney.com/api/qt/clist/get');
-  url.searchParams.set('pn', '1');
-  url.searchParams.set('pz', '6000');
+  url.searchParams.set('pn', String(page));
+  // 东方财富现在会把 pz > 100 静默截到 100；必须逐页拉完整列表。
+  url.searchParams.set('pz', String(CN_LISTING_PAGE_SIZE));
   url.searchParams.set('po', '1');
   url.searchParams.set('np', '1');
-  url.searchParams.set('fid', 'f3');
+  // 用代码排序保持分页稳定；按涨跌幅 f3 排序时盘中翻页会重复/漏项。
+  url.searchParams.set('fid', 'f12');
   url.searchParams.set('fs', 'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048,m:0+t:81+s:1');
-  url.searchParams.set('fields', 'f12,f14');
+  url.searchParams.set('fields', 'f12,f13,f14');
+  return url;
+}
 
-  const resp = await fetch(url.toString(), { headers: { 'User-Agent': UA } });
-  if (!resp.ok) throw new Error(`Eastmoney listings HTTP ${resp.status}`);
-  const json = (await resp.json()) as EmCnResp;
-  const items = json.data?.diff ?? [];
+function toCnTicker(code: string, marketId: number | undefined): string {
+  if (marketId === 1) return `sh${code}`;
+  if (/^[489]/.test(code)) return `bj${code}`;
+  return `sz${code}`;
+}
 
+async function fetchCNListings(): Promise<NewTicker[]> {
   const out: NewTicker[] = [];
   const seen = new Set<string>();
-  for (const it of items) {
-    const code = String(it.f12 ?? '');
-    if (!/^\d{6}$/.test(code)) continue;
-    const prefix = code.startsWith('6') || code.startsWith('9') ? 'sh' : 'sz';
-    const ticker = `${prefix}${code}`;
-    if (seen.has(ticker)) continue;
-    seen.add(ticker);
-    out.push({ ticker, market: 'CN', name: String(it.f14 ?? '') });
+  let total: number | null = null;
+
+  for (let page = 1; ; page++) {
+    const resp = await fetch(buildCNListingUrl(page).toString(), { headers: { 'User-Agent': UA } });
+    if (!resp.ok) throw new Error(`Eastmoney listings page=${page} HTTP ${resp.status}`);
+    const json = (await resp.json()) as EmCnResp;
+    const items = json.data?.diff ?? [];
+    if (typeof json.data?.total === 'number') total = json.data.total;
+
+    for (const it of items) {
+      const code = String(it.f12 ?? '');
+      if (!/^\d{6}$/.test(code)) continue;
+      const ticker = toCnTicker(code, it.f13);
+      if (seen.has(ticker)) continue;
+      seen.add(ticker);
+      out.push({ ticker, market: 'CN', name: String(it.f14 ?? '') });
+    }
+
+    const fetchedRows = (page - 1) * CN_LISTING_PAGE_SIZE + items.length;
+    if (items.length === 0 || (total != null && fetchedRows >= total)) break;
   }
   return out;
 }

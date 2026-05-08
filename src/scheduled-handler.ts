@@ -23,8 +23,8 @@ const BATCH_SIZE = 50;
 const ROUNDS = 2;
 
 // 东方财富对 push2his 公益接口稳定性差，并发一高直接 502/520。
-// CN 标的在每批内串行执行，相邻请求间隔 CN_GAP_MS。Yahoo (US/HK) 仍并发。
-const CN_GAP_MS = 150;
+// CN/HK 标的在每批内串行执行，相邻请求间隔 EASTMONEY_GAP_MS。Yahoo (US) 仍并发。
+const EASTMONEY_GAP_MS = 150;
 
 // 失败熔断：连续"永久失败"达此阈值自动 is_active = 0；可重试错误（5xx/429/超时）不计数。
 const ERROR_DISABLE_THRESHOLD = 10;
@@ -62,21 +62,21 @@ export async function runScheduled(env: Env): Promise<{
     if (jobs.length === 0) break;
     picked += jobs.length;
 
-    // 按 market 分流：US/HK 走 Yahoo 全并发；CN 走东方财富，串行 + 间隔，避免被 5xx
-    const cn: TickerJob[] = [];
+    // 按数据源分流：US 走 Yahoo 全并发；CN/HK 走东方财富，串行 + 间隔，避免被 5xx
+    const eastmoney: TickerJob[] = [];
     const others: TickerJob[] = [];
-    for (const j of jobs) (j.market === 'CN' ? cn : others).push(j);
+    for (const j of jobs) (j.market === 'CN' || j.market === 'HK' ? eastmoney : others).push(j);
 
-    const [othersR, cnR] = await Promise.all([
+    const [othersR, eastmoneyR] = await Promise.all([
       Promise.allSettled(others.map((job) => fetchOneJob(env, s3, job))),
-      runSerialWithGap(env, s3, cn, CN_GAP_MS),
+      runSerialWithGap(env, s3, eastmoney, EASTMONEY_GAP_MS),
     ]);
 
     for (const r of othersR) {
       if (r.status === 'fulfilled' && r.value === true) succeeded++;
       else failed++;
     }
-    for (const ok of cnR) (ok ? succeeded++ : failed++);
+    for (const ok of eastmoneyR) (ok ? succeeded++ : failed++);
   }
 
   console.log(`[cron] done: picked=${picked} ok=${succeeded} failed=${failed}`);
@@ -176,6 +176,8 @@ async function markSuccess(env: Env, job: TickerJob, r: MergeResult): Promise<vo
 function isRetryable(msg: string): boolean {
   // AbortSignal.timeout 抛出来的消息形如 "The operation was aborted" / "TimeoutError"
   if (/abort|timeout/i.test(msg)) return true;
+  // Yahoo 403 通常是上游反爬/区域封禁，不代表 ticker 永久失效，不能因此熔断停用。
+  if (/^Yahoo .* HTTP 403$/.test(msg)) return true;
   // 我们在 sources/* 抛错时把 HTTP 状态码写进了 message
   const m = msg.match(/HTTP (\d{3})/);
   if (!m) return false;
